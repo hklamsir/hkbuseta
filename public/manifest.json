@@ -1,0 +1,22 @@
+{
+  "name": "BusETA — 巴士到站時間",
+  "short_name": "BusETA",
+  "description": "輸入地標，尋找附近九巴及龍運巴士站與實時到站時間",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f5f6f7",
+  "theme_color": "#b3121b",
+  "lang": "zh-Hant-HK",
+  "categories": ["travel", "navigation", "utilities"],
+  "icons": [
+    { "src": "icons/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "搜尋附近巴士站", "url": "./index.html" }
+  ]
+}

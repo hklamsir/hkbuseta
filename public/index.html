@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-HK">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#b3121b">
+<meta name="description" content="輸入地標，尋找附近九巴及龍運巴士站與實時到站時間">
+<title>BusETA — 巴士到站時間</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="stylesheet" href="vendor/leaflet.css">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+
+<!-- 圖示 -->
+<svg style="display:none" xmlns="http://www.w3.org/2000/svg">
+	<symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></symbol>
+	<symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+	<symbol id="i-chev" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></symbol>
+	<symbol id="i-back" viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></symbol>
+	<symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"/></symbol>
+	<symbol id="i-star" viewBox="0 0 24 24"><path d="M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z"/></symbol>
+	<symbol id="i-map" viewBox="0 0 24 24"><path d="M9 4L3 6.5v13L9 17l6 2.5 6-2.5v-13L15 6.5zM9 4v13M15 6.5v13"/></symbol>
+	<symbol id="i-pin" viewBox="0 0 24 24"><path d="M12 21s7-6.3 7-11a7 7 0 1 0-14 0c0 4.7 7 11 7 11z"/><circle cx="12" cy="10" r="2.5"/></symbol>
+	<symbol id="i-bus" viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="14" rx="2"/><path d="M4 10h16M8 17v3M16 17v3M8 14h1M15 14h1"/></symbol>
+	<symbol id="i-warn" viewBox="0 0 24 24"><path d="M12 8v5M12 16.5v.5"/><path d="M10.3 3.9L2.6 17.4A1.8 1.8 0 0 0 4.2 20h15.6a1.8 1.8 0 0 0 1.6-2.6L13.7 3.9a1.8 1.8 0 0 0-3.1 0z"/></symbol>
+	<symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></symbol>
+	<symbol id="i-off" viewBox="0 0 24 24"><path d="M12 8v4M8.5 13.5a5 5 0 0 1 7 0M5 10.5a10 10 0 0 1 4-2.4M19 10.5a10 10 0 0 0-3-2M2 2l20 20"/></symbol>
+	<symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></symbol>
+</svg>
+
+<div id="app">
+
+	<!-- ① 搜尋頁 -->
+	<section class="page active" id="page-search">
+		<header class="topbar">
+			<h1>BusETA<span class="sub">九巴及龍運巴士到站時間</span></h1>
+		</header>
+
+		<div class="search-box">
+			<div class="search-field" id="search-field">
+				<svg><use href="#i-search"/></svg>
+				<input type="search" id="q" placeholder="輸入大廈、商場、機場…" autocomplete="off"
+					enterkeyhint="search" autocorrect="off" autocapitalize="off" spellcheck="false">
+				<button class="clear" id="q-clear" aria-label="清除">
+					<svg><use href="#i-x"/></svg>
+				</button>
+			</div>
+		</div>
+
+		<div id="search-status"></div>
+		<div id="search-results"></div>
+		<div id="recent"></div>
+
+		<div class="foot">
+			<div id="data-stamp"></div>
+			<div style="margin-top:8px">
+				<span class="link" id="clear-data">清除搜尋記錄與最愛站</span>
+			</div>
+			<div style="margin-top:10px">
+				<span id="net-state"></span>
+			</div>
+			<div style="margin-top:8px">
+				資料來源：運輸署「九龍巴士及龍運巴士路線實時到站數據」<br>
+				<a href="https://data.gov.hk/tc-data/dataset/hk-td-tis_21-etakmb" target="_blank" rel="noopener">data.gov.hk</a>
+				· 知識產權屬九巴及龍運
+			</div>
+		</div>
+	</section>
+
+	<!-- ② 附近站列表 -->
+	<section class="page" id="page-nearby">
+		<header class="topbar">
+			<button class="icon-btn" id="nb-back" aria-label="返回">
+				<svg><use href="#i-back"/></svg>
+			</button>
+			<h1>附近巴士站<span class="sub" id="nb-sub"></span></h1>
+			<button class="icon-btn" id="nb-map" aria-label="顯示地圖" title="顯示地圖">
+				<svg><use href="#i-map"/></svg>
+			</button>
+		</header>
+
+		<div class="place-bar">
+			<svg><use href="#i-pin"/></svg>
+			<span class="nm" id="nb-place"></span>
+		</div>
+
+		<div class="range-bar">
+			<div class="range-seg" id="range-seg">
+				<button data-r="100">100米</button>
+				<button data-r="200" class="on">200米</button>
+				<button data-r="500">500米</button>
+			</div>
+			<button class="map-btn" id="nb-map2">
+				<svg><use href="#i-map"/></svg><span>地圖</span>
+			</button>
+		</div>
+
+		<div class="section-title" id="nb-count"></div>
+		<div id="nb-list"></div>
+	</section>
+
+	<!-- ③ 站點 ETA -->
+	<section class="page" id="page-eta">
+		<header class="topbar">
+			<button class="icon-btn" id="eta-back" aria-label="返回">
+				<svg><use href="#i-back"/></svg>
+			</button>
+			<h1>到站時間<span class="sub" id="eta-sub"></span></h1>
+			<button class="icon-btn" id="eta-refresh" aria-label="立即更新">
+				<svg><use href="#i-refresh"/></svg>
+			</button>
+		</header>
+
+		<div class="stop-hero">
+			<div class="nm" id="eta-name"></div>
+			<div class="co" id="eta-coord"></div>
+		</div>
+
+		<div class="section-title">
+			<span id="eta-status">每 15 秒更新</span>
+			<span class="count" id="eta-stamp"></span>
+		</div>
+		<div id="eta-list"></div>
+	</section>
+</div>
+
+<!-- 地圖 -->
+<div id="map">
+	<button class="map-close" id="map-close" aria-label="關閉地圖">
+		<svg><use href="#i-x"/></svg>
+	</button>
+	<div class="offline-badge" id="map-offline">離線模式：無底圖（站點位置仍準確）</div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="vendor/leaflet.js"></script>
+<script src="js/data.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

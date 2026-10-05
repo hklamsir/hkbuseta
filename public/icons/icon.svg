@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="BusETA">
+  <rect width="512" height="512" rx="96" fill="#b3121b"/>
+  <g fill="none" stroke="#fff" stroke-width="26" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M150 128h212a22 22 0 0 1 22 22v164a22 22 0 0 1-22 22H150a22 22 0 0 1-22-22V150a22 22 0 0 1 22-22z"/>
+    <path d="M128 224h256"/>
+    <path d="M168 262v34M344 262v34"/>
+    <path d="M160 336v44M352 336v44"/>
+  </g>
+  <circle cx="212" cy="196" r="15" fill="#fff"/>
+  <circle cx="300" cy="196" r="15" fill="#fff"/>
+  <circle cx="256" cy="416" r="34" fill="#fff"/>
+  <path d="M256 398v18l13 9" fill="none" stroke="#b3121b" stroke-width="11" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

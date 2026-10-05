@@ -1,0 +1,23 @@
+# 本地開發
+node_modules/
+.DS_Store
+Thumbs.db
+
+# 離線資料（由 scripts/build-data.mjs 生成，339 KB）
+# 若部署平台有大小限制或想加快 git clone，可 uncomment 這行並用 CI 重新生成：
+# public/data/*.gz
+# public/data/build-manifest.json
+
+# 驗證產物
+screenshots/
+.playwright-cli/
+.playwright/
+
+# 編輯器
+.vscode/
+.idea/
+*.swp
+
+# 實測原始 JSON（4.4 MB，由 scripts/ 重新抓即可）
+# 只保留官方 PDF 規格作參考
+docs/reference/*.json
