@@ -65,6 +65,14 @@ scripts/
 └── verify-offline.mjs  離線模式驗證（13 項）
     verify-sw-version.mjs  SW 版本追蹤驗證
 
+部署設定：
+├── wrangler.jsonc      Workers Builds：name + assets.directory=./public
+└── package.json        wrangler ^4.147.0（devDependency，deploy = `npm run deploy`）
+
+> **不要把 Deploy command 改回 `npx wrangler deploy`。**
+> Workers Builds 環境非互動（`CI=true`），`npx` 會拒絕自動下載套件而失敗；
+> 必須用本地依賴（`npm run deploy`）。詳見 `docs/deploy-cloudflare.md`。
+
 .github/workflows/
 └── update-data.yml     每日 05:30 HKT 自動更新離線資料（資料無變則不部署）
 
