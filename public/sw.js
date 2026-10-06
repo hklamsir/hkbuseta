@@ -6,20 +6,24 @@
  *   2. ETA / Nominatim 採 Network First，失敗回退最後一次成功回應
  *
  * 版本管理：SHELL_CACHE 用「資料 buildId + 殼層檔案 hash」組成。
- * buildId 由 build-data.mjs 按資料內容 hash 算出；
- * 殼層 hash 由本檔案在 install 時對每個殼層檔案算content hash。
- * → 資料或程式任一方改動，快取名都會變，用戶自動收到新版本。
+ * buildId 由 build-data.mjs 按資料**內容** hash 算出（gz 已剔除時間戳，
+ * 故資料無實質變化時 buildId 不變）；殼層 hash 由本檔案在 install 時對每個
+ * 殼層檔案算content hash，並配合 bump-sw.mjs 寫入的 BUILD_STAMP（純內容 hash）。
+ * → 資料或程式任一方改動，快取名才會變，用戶自動收到新版本。
  *
  * ⚠️ 維護須知：改任何殼層檔案（index.html / css / js / vendor）後，
  *    必須令本檔案（sw.js）本身也產生變化，否則瀏覽器不會重新執行 install，
  *    新版 App Shell 永遠不會推給用戶。最可靠做法：
  *      node scripts/bump-sw.mjs
  *    會自動更新下方 BUILD_STAMP。
+ *    ⚠️ BUILD_STAMP 與 buildId 都**不可**包含日期或時間戳 ——
+ *    否則即使內容零變化，每日跑一次部署都會改動 sw.js，
+ *    用戶被迫每日重裝 SW 並重下 339 KB 離線資料。
  *    （本機 dev server 無 ETag 時靠 stamp；部署平台兩者皆有效。）
  */
 
-/** 殼層版本戳：改殼層檔案後跑 scripts/bump-sw.mjs 自動更新 */
-const BUILD_STAMP = '2026-10-05-5538da';
+/** 殼層版本戳：純內容 hash（無日期）。改殼層檔案後跑 scripts/bump-sw.mjs 自動更新 */
+const BUILD_STAMP = '3cedc099';
 
 /** 參與版本 hash 的殼層檔案（改動任何一個都會令快取名改變） */
 const VERSIONED = [

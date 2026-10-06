@@ -123,9 +123,19 @@ async function main() {
 	// ---- 輸出 ----
 	await mkdir(OUT_DIR, { recursive: true });
 
+	// ⚠️ gz 內容**不可**包含任何時間戳或隨機值，否則每次產出的位元組都不同。
+	//
+	// 原因：buildId 會成為 Service Worker 的快取名（見 sw.js resolveShellCache）。
+	// 若 gz 含時間戳，即使官方資料實際零變化，buildId 都會每日改變
+	// → 用戶每日被迫重新下載 339 KB 離線資料並重裝 SW，但內容其實一模一樣
+	//（實測 2026-10-05 vs 10-06 僅 86S 兩行 routeStops 改動）。
+	//
+	// 打包時間改記於 build-manifest.json 的 built / updated（該檔不參與 buildId 計算，
+	// 亦不列入 bump-sw.mjs 的 VERSIONED），前端由 data.js 讀 manifest.updated 顯示。
+	const builtAt = new Date();
 	const files = [
-		gzipToFile('stops.json.gz', { v: 1, updated: new Date().toISOString().slice(0, 16).replace('T', ' '), data: stops }),
-		gzipToFile('routes.json.gz', { v: 1, updated: new Date().toISOString().slice(0, 16).replace('T', ' '), routes, routeStops })
+		gzipToFile('stops.json.gz', { v: 1, data: stops }),
+		gzipToFile('routes.json.gz', { v: 1, routes, routeStops })
 	];
 
 	for (const f of files) {
@@ -141,15 +151,26 @@ async function main() {
 	console.log(`\n  合計 ${(totalRaw / 1024).toFixed(0)} KB → ${(totalGz / 1024).toFixed(0)} KB`);
 	console.log(`  官方原始 4.24 MB → ${(totalGz / 4.24e6 * 100).toFixed(1)}%`);
 
-	// buildId = 兩份 gz 的 hash 前 8 碼
-	// Service Worker 用它做 cache name，資料一變快取名就變 → 用戶自動拿到新版本
+	// buildId = **未壓縮 JSON 內容**的 hash 前 8 碼（不是 gz 的 hash）
+	//
+	// 為何用 raw 而非 gz：gzip 輸出位元組依賴 zlib 版本。本機 Windows（zlib 1.3.1-e00f703）
+	// 與 GitHub Actions ubuntu-latest 的 zlib patch 版本可能不同 → 即使資料完全相同，
+	// 兩邊產出的 gz 位元組仍可能不一致。若 buildId 取自 gz，CI 會每日誤判「資料有變」，
+	// 反而每天都部署、每天都逼用戶重下載 —— 正是本改造要消除的問題。
+	// raw JSON 內容跨平台穩定，故 buildId 只反映真正的資料變化。
+	//
+	// 效果：
+	//   資料無實質變化 → buildId 不變 → 用戶不會收到無謂更新（跨平台一致）
+	//   資料有變化     → buildId 變 → 用戶自動收到新版
 	const { createHash } = await import('node:crypto');
 	const h = createHash('sha256');
-	for (const f of files) h.update(f.gz);
+	for (const f of files) h.update(f.raw);
 	const buildId = h.digest('hex').slice(0, 8);
 
 	const manifest = {
-		built: new Date().toISOString(),
+		built: builtAt.toISOString(),
+		// 顯示用時間（Y-M-D H:M），供前端 UI 顯示「更新於 …」；不參與任何 hash
+		updated: builtAt.toISOString().slice(0, 16).replace('T', ' '),
 		buildId,
 		stops: stops.length,
 		routes: routes.length,
@@ -159,6 +180,7 @@ async function main() {
 	await writeFile(join(OUT_DIR, 'build-manifest.json'), JSON.stringify(manifest, null, 2));
 
 	console.log(`\n  buildId: ${buildId}（Service Worker 快取名 buseta-shell-${buildId}）`);
+	console.log(`  打包時間: ${manifest.updated}（不參與 buildId，資料無變則 buildId 不變）`);
 	console.log(`✅ 完成，耗時 ${((Date.now() - t0) / 1000).toFixed(1)} 秒`);
 }
 

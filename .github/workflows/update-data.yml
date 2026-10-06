@@ -1,0 +1,102 @@
+name: 每日更新離線資料
+
+# 官方資料每日 05:00 HKT 更新 → 05:30 HKT 抓取（cron 用 UTC：21:30 前一日）
+on:
+  schedule:
+    - cron: '30 21 * * *'
+  # 支援手動觸發（Settings → Actions → 每日更新離線資料 → Run workflow）
+  workflow_dispatch:
+
+# 只需寫入權限（自動 commit 資料檔），不需要其他額外權限
+permissions:
+  contents: write
+
+# 同一時間只跑一個，避免官方 API 限流時重試疊加
+concurrency:
+  group: update-data
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # build-data.mjs 對 /route-stop 首次請求常回 403（需 User-Agent），
+      # 腳本內建指數退避重試；官方 API 每 IP 每日 1,000 次上限，務必勿改為平行請求。
+      - name: 抓取並打包離線資料
+        run: node scripts/build-data.mjs
+
+      # 防呆：官方 API 異常回傳空資料時中止，不要把空資料推到 production。
+      # 門檻取現況（6,753 站 / 1,605 路線 / 36,337 關聯）的一個安全下界。
+      - name: 資料健全性檢查
+        run: |
+          node -e "
+          const m = require('./public/data/build-manifest.json');
+          const bad = [];
+          if (m.stops < 6000)         bad.push('車站數 ' + m.stops + ' < 6000');
+          if (m.routes < 1500)        bad.push('路線數 ' + m.routes + ' < 1500');
+          if (m.routeStops < 30000)   bad.push('路線站關聯 ' + m.routeStops + ' < 30000');
+          if (bad.length) { console.error('❌ 資料異常，中止部署：\n  - ' + bad.join('\n  - ')); process.exit(1); }
+          console.log('✅ 資料健全（' + m.stops + ' 站 / ' + m.routes + ' 路線 / ' + m.routeStops + ' 關聯）');
+          console.log('   buildId: ' + m.buildId);
+          "
+
+      # 決定是否需要部署。
+      #
+      # 判斷依據是 **buildId**（= 未壓縮 JSON 內容的 hash），不是 git diff。
+      # 原因：gzip 位元組依賴 zlib 版本，ubuntu-latest 與本機 Windows 產出的
+      # gz 位元組可能不同，即使資料完全相同。若用 git diff 判斷，CI 會每日
+      # 誤判為「有變化」而每天都部署 —— 正好抵銷本 workflow 的目的。
+      # buildId 取自解壓後內容，跨平台一致，才是可靠的判斷依據。
+      - name: 偵測資料是否有實質變化
+        id: diff
+        run: |
+          BEFORE=$(git show HEAD:public/data/build-manifest.json | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).buildId")
+          AFTER=$(node -p "require('./public/data/build-manifest.json').buildId")
+          echo "  buildId（部署前）: $BEFORE"
+          echo "  buildId（抓取後）: $AFTER"
+          if [ "$BEFORE" = "$AFTER" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "ℹ️ 離線資料無實質變化 → 跳過部署，用戶不會收到無謂更新"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "🔔 離線資料有變化，繼續部署"
+          fi
+
+      # 只有殼層或資料變了才需要令 sw.js 位元組改變，否則用戶不會重新 install。
+      # BUILD_STAMP 為純內容 hash（gz 解壓後計算），無變化時此步驟不會改動 sw.js。
+      - name: Bump Service Worker 版本戳
+        if: steps.diff.outputs.changed == 'true'
+        run: node scripts/bump-sw.mjs
+
+      - name: Commit 並推送
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add public/data public/sw.js
+          BUILD_ID=$(node -p "require('./public/data/build-manifest.json').buildId")
+          git commit -m "chore(data): 更新離線資料 buildId ${BUILD_ID}"
+          git push
+          echo "✅ 已推送，Cloudflare Workers Builds 將自動部署"
+
+      - name: 總結
+        if: always()
+        run: |
+          {
+            echo "### 每日離線資料更新"
+            echo ""
+            echo "- buildId: \`$(node -p "require('./public/data/build-manifest.json').buildId")\`"
+            echo "- 打包時間: $(node -p "require('./public/data/build-manifest.json').updated")"
+            echo "- 是否有實質變化: ${{ steps.diff.outputs.changed }}"
+            echo "- 是否已部署: ${{ steps.diff.outputs.changed == 'true' && '是' || '否（資料無變，節省用戶流量）' }}"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -150,7 +150,10 @@
 
 			return {
 				version: stopsRaw.v,
-				updated: stopsRaw.updated,
+				// 打包時間來自 build-manifest.json，不在 gz 內。
+				// 原因見 scripts/build-data.mjs：gz 必須保持位元組決定性，
+				// 否則 buildId（= hash(gz)）每日必變，用戶會被逼每日重下 339 KB。
+				updated: manifest.updated || manifest.built?.slice(0, 16).replace('T', ' ') || '未知',
 				stopById,
 				stopsByName,
 				stopRoutes,

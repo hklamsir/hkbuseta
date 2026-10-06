@@ -21,46 +21,47 @@ Service Worker 會快取 App Shell。**改咗 `js/`、`css/`、`index.html` 之�
 
 ```bash
 node scripts/build-data.mjs    # 更新離線資料（若需要的話）
-node scripts/bump-sw.mjs# ← 必須：自動更新 sw.js 內的 BUILD_STAMP
+node scripts/bump-sw.mjs       # ← 必須：自動更新 sw.js 內的 BUILD_STAMP
 ```
 
-`bump-sw.mjs` 會計算所有殼層檔案（含 gz 資料）的 sha256，寫成時間戳 + hash。
-部署後用戶 Service Worker 會偵測到變化 → 重新 install → 快取名改變 → 拿到新版。
+`bump-sw.mjs` 會計算所有殼層檔案的 sha256（gz 檔以**解壓後內容**計算，確保跨平台一致），
+寫入 `sw.js` 的 `BUILD_STAMP`。部署後用戶 Service Worker 會偵測到變化 → 重新 install →
+快取名改變 → 拿到新版。
 
-已驗證：改 CSS → bump → 快取名從 `buseta-shell-47dec145-...-a-13u1fus`
-變為 `buseta-shell-47dec145-...-653053-1rz3qyl`，舊快取自動刪除。
+> **BUILD_STAMP 與 `buildId` 都只由內容決定，不含日期。**
+> 若帶日期，即使殼層與資料完全無變，每日跑一次部署都會改動 `sw.js`，
+> 用戶被迫每日重裝 SW 並重下 339 KB 離線資料。因此 `bump-sw.mjs` 在內容無變時
+> **不會寫入** `sw.js`，直接 exit 0。
+
+已驗證：改 CSS → bump → 快取名從 `buseta-shell-ea6c5ce1-3cedc099-...-1v656db`
+變為新值，舊快取自動刪除；還原後再 bump → 快取名回到原值。
 
 可用 `node scripts/verify-sw-version.mjs` 驗證整個流程。
 
-## 建議：改用 CI 自動部署
+## 每日自動更新資料（已內建）
 
-因為 `build-data.mjs` 依賴網絡（抓運輸署 API），在本地跑的結果未必與 CI 一致。
-建議用 GitHub Actions + Wrangler：
+`.github/workflows/update-data.yml` 已配置好，**毋須再自行建立**：
 
-```yaml
-name: Deploy to Cloudflare Pages
-on:
-  push:
-    branches: [main]
-  schedule:
-    - cron: '0 21 * * *'   # 每日 05:00 HKT 更新資料後部署
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 22 }
-      - run: node scripts/build-data.mjs
-      - run: node scripts/bump-sw.mjs      # ← 關鍵
-      - uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CF_API_TOKEN }}
-          accountId: ${{ secrets.CF_ACCOUNT_ID }}
-          command: pages deploy public --project-name=buseta
-```
+- 每日 **05:30 HKT**（cron `30 21 * * *` UTC，官方資料 05:00 更新後 30 分鐘）
+- 流程：抓 API → 健全性檢查 → 比對 `buildId` → **僅在有實質變化時** bump + commit + push
+- 部署由 **Cloudflare Workers Builds** 自動接手（repo 已連結），故**毋須 Cloudflare API Token**
+
+首次使用可到 Actions 頁手動按 **Run workflow** 驗證。
+
+### 為何要用 `buildId` 而非 `git diff` 判斷變化
+
+`buildId` = **未壓縮 JSON 內容**的 hash。gzip 位元組依賴 zlib 版本，
+本機 Windows（zlib 1.3.1-e00f703）與 ubuntu-latest 的版本可能不同 → 同一份資料
+產出的 gz 位元組可能不一致。若用 `git diff` 判斷，CI 會每日誤判「有變化」而每天部署，
+抵銷本改造目的。實測以三種 gzip level 壓縮同一份資料：gz hash 全部不同
+（`3abf68c6` / `b5835aaa` / `90cdafb5`），但 buildId 恆為 `ea6c5ce1`。
 
 ## 需要的 Cloudflare 憑證
+
+**現行配置（Workers Builds + GitHub 連結）：毋須任何憑證。**
+
+部署由 Cloudflare Workers Builds 自動接手，GitHub Actions 只需 `contents: write`
+（內建權限，不需設定 secret）。以下憑證僅在你改用 `wrangler` 手動部署時才需要：
 
 - **Account ID**：Cloudflare 後台右側可見
 - **API Token**：Workers & Pages → API Tokens → Create → 模板「Edit Cloudflare Workers」

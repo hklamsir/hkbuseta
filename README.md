@@ -27,6 +27,16 @@ node scripts/bump-sw.mjs
 
 **部署前必讀**：[docs/deploy-cloudflare.md](docs/deploy-cloudflare.md) — 重點是 Service Worker 的 `bump-sw.mjs` 步驟。
 
+### 每日自動更新資料
+
+`.github/workflows/update-data.yml` 每日 **05:30 HKT**（cron `30 21 * * *` UTC）自動執行：
+
+1. `build-data.mjs` 抓官方 API → 精簡 → gzip
+2. 資料健全性檢查（車站 < 6,000／路線 < 1,500／關聯 < 30,000 即中止，防止異常資料推上 production）
+3. 比較 `buildId`；**只在資料有實質變化時**才 `bump-sw.mjs` → commit → push → 觸發 Cloudflare 自動部署
+
+`buildId` 只反映**資料內容**（gz 已剔除時間戳，hash 計算基於解壓後內容），所以官方資料無變化時不會部署，用戶亦不會無故被逼重新下載 339 KB 離線資料。首次手動測試可到 Actions 頁按 **Run workflow**。
+
 ---
 
 ## 專案結構
@@ -49,11 +59,14 @@ public/
 
 scripts/
 ├── build-data.mjs      離線資料打包（4.24MB → 339 KB，8%）
-├── bump-sw.mjs         Service Worker 版本戳（部署前必須跑）
+├── bump-sw.mjs         Service Worker 版本戳（部署前必須跑；純內容 hash，無變不改 sw.js）
 ├── serve.mjs           零依賴開發伺服器
 ├── verify.mjs          Playwright 端到端驗證（46 項）
 └── verify-offline.mjs  離線模式驗證（13 項）
     verify-sw-version.mjs  SW 版本追蹤驗證
+
+.github/workflows/
+└── update-data.yml     每日 05:30 HKT 自動更新離線資料（資料無變則不部署）
 
 docs/
 ├── BusETA規劃書.md     產品與技術規劃
