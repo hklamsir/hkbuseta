@@ -1,0 +1,19 @@
+{
+	"name": "hkbuseta",
+	"version": "1.0.0",
+	"private": true,
+	"description": "BusETA — 香港九巴／龍運巴士到站時間 PWA（純靜態前端）",
+	"type": "module",
+	"scripts": {
+		"build": "echo \"純靜態專案，無需建置步驟\"",
+		"deploy": "wrangler deploy",
+		"dev": "wrangler dev",
+		"update-data": "node scripts/build-data.mjs && node scripts/bump-sw.mjs"
+	},
+	"devDependencies": {
+		"wrangler": "^4.147.0"
+	},
+	"engines": {
+		"node": ">=22"
+	}
+}
