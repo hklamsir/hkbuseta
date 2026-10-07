@@ -3,6 +3,9 @@ node_modules/
 .DS_Store
 Thumbs.db
 
+# 本地專案資料（WorkBuddy：含 memory / skills，不應推送至倉庫）
+.workbuddy/
+
 # 離線資料（由 scripts/build-data.mjs 生成，339 KB）
 # 若部署平台有大小限制或想加快 git clone，可 uncomment 這行並用 CI 重新生成：
 # public/data/*.gz
