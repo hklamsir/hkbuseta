@@ -29,6 +29,8 @@
 	<symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></symbol>
 	<symbol id="i-off" viewBox="0 0 24 24"><path d="M12 8v4M8.5 13.5a5 5 0 0 1 7 0M5 10.5a10 10 0 0 1 4-2.4M19 10.5a10 10 0 0 0-3-2M2 2l20 20"/></symbol>
 	<symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></symbol>
+	<symbol id="i-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
+	<symbol id="i-route" viewBox="0 0 24 24"><circle cx="6" cy="19" r="2.5"/><circle cx="18" cy="5" r="2.5"/><path d="M8.5 19H14a4 4 0 0 0 4-4v-5.5"/></symbol>
 </svg>
 
 <div id="app">
@@ -117,6 +119,9 @@
 		<div class="stop-hero">
 			<div class="nm" id="eta-name"></div>
 			<div class="co" id="eta-coord"></div>
+			<button class="star" id="eta-fav" aria-label="加入常到車站" title="加入常到車站">
+				<svg><use href="#i-star"/></svg>
+			</button>
 		</div>
 
 		<div class="section-title">
@@ -124,6 +129,45 @@
 			<span class="count" id="eta-stamp"></span>
 		</div>
 		<div id="eta-list"></div>
+	</section>
+
+	<!-- ④ 路線詳情（站序 + 選中站 ETA） -->
+	<section class="page" id="page-route">
+		<header class="topbar">
+			<button class="icon-btn" id="rt-back" aria-label="返回">
+				<svg><use href="#i-back"/></svg>
+			</button>
+			<h1>路線詳情<span class="sub" id="rt-sub"></span></h1>
+			<button class="star" id="rt-fav" aria-label="加入常搭路線" title="加入常搭路線">
+				<svg><use href="#i-star"/></svg>
+			</button>
+		</header>
+
+		<div class="route-hero">
+			<div class="no" id="rt-no"></div>
+			<div class="meta">
+				<span id="rt-dest"></span>
+				<span class="svc-tag" id="rt-svc" hidden></span>
+				<span class="ct" id="rt-count"></span>
+			</div>
+		</div>
+
+		<!-- 方向分頁：零網絡請求（離線站序已含 O/I 兩方向） -->
+		<div class="range-bar" style="padding-top:10px">
+			<div class="dir-tabs" id="rt-dirs"></div>
+			<button class="icon-btn" id="rt-refresh" aria-label="立即更新" title="立即更新" style="margin-left:8px">
+				<svg><use href="#i-refresh"/></svg>
+			</button>
+		</div>
+
+		<div class="seq-hint" id="rt-hint" hidden></div>
+
+		<div class="section-title">
+			<span id="rt-status"></span>
+			<span class="count" id="rt-stamp"></span>
+		</div>
+
+		<div class="seq-list" id="rt-list"></div>
 	</section>
 </div>
 

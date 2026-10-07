@@ -120,6 +120,22 @@
 			const routeSeqs = new Array(routeList.length);
 			for (let i = 0; i < routeSeqs.length; i++) routeSeqs[i] = [];
 
+			// routeIdxByKey: "route|bound|svc" → routeIdx
+			// 路線頁必需：ETA 頁點擊時只知道路線號，要反查站序。
+			// 實測 (route,bound,svc) 三元組唯一（1605 條變體無重複）。
+			// 必須用完整三元組：221 組 (route,bound) 有多個 svc，其中 220 組站序唔同
+			// （例 3D/I 平日去「慈雲山(中)」17 站、繁忙時段去「慈雲山(南)」13 站）。
+			const routeIdxByKey = new Map();
+			// routeIdxByNo: "route|bound" → [routeIdx...]（同路線號多 svc 候選）
+			const routeIdxByNo = new Map();
+			for (let i = 0; i < routeList.length; i++) {
+				const [route, bound, svc] = routeList[i];
+				routeIdxByKey.set(`${route}|${bound}|${svc}`, i);
+				const k2 = `${route}|${bound}`;
+				if (!routeIdxByNo.has(k2)) routeIdxByNo.set(k2, []);
+				routeIdxByNo.get(k2).push(i);
+			}
+
 			routesRaw.routeStops.forEach(([ri, seq, si]) => {
 				const r = routeList[ri];
 				if (!r) return;
@@ -159,6 +175,8 @@
 				stopRoutes,
 				routeList,
 				routeSeqs,
+				routeIdxByKey,
+				routeIdxByNo,
 				loadMs: Math.round(performance.now() - t0)
 			};
 		},
@@ -177,6 +195,25 @@
 		/** 全線所有站 ETA */
 		async fetchRouteEta(route, svc, signal) {
 			const json = await this._get(`route-eta/${route}/${svc}`, signal);
+			return json.data || [];
+		},
+
+		/**
+		 * 單站 + 單路線 + 單 svc 的 ETA（路線詳情頁專用）。
+		 *
+		 * 為何唔用 fetchRouteEta：實測 route-eta 每次 13-43 KB（平均 25 KB），
+		 * 而本端點實測僅 961 bytes —— 細 30 倍。路線頁只顯示「選中站」的 ETA，
+		 * 用全線端點會把 43 KB 資料丟掉 99%。
+		 *
+		 * ⚠️ 回應會混合方向：同一物理 stop 若同時是該路線 O 與 I 方向的站，
+		 * 會同時回兩組（實測 /eta/18492910339410B1/1/1 → 6 rows，
+		 * O seq 1 + I seq 25 各 3 班）。故 caller 必須按 (dir, seq) 過濾。
+		 *
+		 * 注意：此方法為 optional，不列入 registerAdapter 必填清單
+		 * （規劃書 §5.7：adapter 介面不應因可選功能而收窄未來擴充點）。
+		 */
+		async fetchSingleStopEta(stopId, route, svc, signal) {
+			const json = await this._get(`eta/${stopId}/${route}/${svc}`, signal);
 			return json.data || [];
 		},
 
@@ -266,6 +303,36 @@
 		return (store.routeSeqs[routeIdx] || []).sort((a, b) => a.seq - b.seq);
 	}
 
+	/**
+	 * 反查路線站序索引。
+	 * key 格式 "route|bound|svc"（bound 為 'O'/'I'）。
+	 * 找不到回 null —— caller 應據此走 fallback（svc=1 → 離線站序）。
+	 */
+	function findRouteIdx(store, route, bound, svc) {
+		return store.routeIdxByKey.get(`${route}|${bound}|${svc}`) ?? null;
+	}
+
+	/**
+	 * 取得某路線某方向的站序（直接用 stopById 展開好的物件陣列）。
+	 * svc 不存在於離線資料時，依序試 svc=1，再試該方向任何一個變體。
+	 * 回 { idx, seq, stops } 或 null。
+	 */
+	function resolveRouteSeq(store, route, bound, svc) {
+		let idx = findRouteIdx(store, route, bound, svc);
+		if (idx === null && svc !== 1) idx = findRouteIdx(store, route, bound, 1);
+		if (idx === null) {
+			const cands = store.routeIdxByNo.get(`${route}|${bound}`) || [];
+			idx = cands.length ? cands[0] : null;
+		}
+		if (idx === null) return null;
+		const seq = getRouteSequence(store, idx);
+		return {
+			idx,
+			seq,
+			stops: seq.map((s) => ({ ...store.stopById.get(s.stop), seq: s.seq })).filter((s) => s.stop)
+		};
+	}
+
 	/* ============ ETA 處理 ============ */
 
 	/**
@@ -338,6 +405,17 @@
 
 	const LS_RECENT = 'buseta.recent';
 	const LS_FAV = 'buseta.favorites';
+	const LS_FAV_ROUTES = 'buseta.favRoutes';
+	const LS_ROUTE_VISITS = 'buseta.routeVisits';
+
+	/** 讀一個 localStorage JSON key，容錯 */
+	function lsGet(k, fallback) {
+		try { const v = JSON.parse(localStorage.getItem(k)); return v ?? fallback; }
+		catch { return fallback; }
+	}
+	function lsSet(k, v) {
+		try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* 私隱模式／配額滿 */ }
+	}
 
 	const store = {
 		recent: {
@@ -361,6 +439,75 @@
 				return i < 0;
 			},
 			clear() { localStorage.removeItem(LS_FAV); }
+		},
+
+		/**
+		 * 常搭路線（手動釘選）。
+		 * 項目：{ r: 路線號, b: 'O'|'I', s: svc, d: 終點名, at: 加入時間 }
+		 * 上限 10 條，超出丟最舊。排序 = 加入時間倒序（最常加星的排頭）。
+		 */
+		favRoutes: {
+			MAX: 10,
+			load() { return lsGet(LS_FAV_ROUTES, []); },
+			has(r, b, s) {
+				return this.load().some((x) => x.r === r && x.b === b && String(x.s) === String(s));
+			},
+			toggle(r, b, s, dest) {
+				const list = this.load();
+				const i = list.findIndex((x) => x.r === r && x.b === b && String(x.s) === String(s));
+				if (i >= 0) list.splice(i, 1);
+				else {
+					list.unshift({ r, b, s, d: dest || '', at: Date.now() });
+					if (list.length > this.MAX) list.length = this.MAX;
+				}
+				lsSet(LS_FAV_ROUTES, list);
+				return i < 0;
+			},
+			clear() { localStorage.removeItem(LS_FAV_ROUTES); }
+		},
+
+		/**
+		 * 常搭路線 — 自動訪問統計（補充手動釘選）。
+		 * key = "route|bound"，value = 次數。
+		 * 門檻：同一路線首次進入不計（視為試用），第二次起才累加 ——
+		 * 避免用戶「試下新路線」就污染清單。
+		 * 上限 20 個 key，超出丟次數最少的。
+		 */
+		routeVisits: {
+			MAX: 20,
+			THRESHOLD: 2,
+			load() { return lsGet(LS_ROUTE_VISITS, {}); },
+			/** @returns {{count:number, counted:boolean}} counted=本次是否真的累加 */
+			visit(r, b) {
+				const k = `${r}|${b}`;
+				const map = this.load();
+				const prev = map[k] || 0;
+				// 首次（prev===0）只建立 key 不累加 → 第二次起才計
+				const next = prev === 0 ? 1 : prev + 1;
+				map[k] = next;
+				if (Object.keys(map).length > this.MAX) {
+					const entries = Object.entries(map)
+						.sort((a, b2) => a[1] - b2[1]);
+					for (const [ek] of entries) {
+						if (Object.keys(map).length <= this.MAX) break;
+						delete map[ek];
+					}
+				}
+				lsSet(LS_ROUTE_VISITS, map);
+				return { count: next, counted: prev > 0 };
+			},
+			/** 達門檻的項目，按次數倒序；已釘選的由 caller 排除 */
+			top(n) {
+				return Object.entries(this.load())
+					.filter(([, c]) => c >= this.THRESHOLD)
+					.sort((a, b) => b[1] - a[1])
+					.slice(0, n)
+					.map(([k, c]) => {
+						const [r, b] = k.split('|');
+						return { route: r, bound: b, count: c };
+					});
+			},
+			clear() { localStorage.removeItem(LS_ROUTE_VISITS); }
 		}
 	};
 
@@ -370,6 +517,7 @@
 		HK_BOUNDS, inHK, haversine, groupKey,
 		registerAdapter, getAdapter, TransportAdapters,
 		findNearbyStops, getStopRoutes, getRouteSequence,
+		findRouteIdx, resolveRouteSeq,
 		normalizeEta, formatEta, SERVICE_LABELS,
 		store
 	};

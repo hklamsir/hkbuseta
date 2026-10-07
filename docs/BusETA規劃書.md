@@ -280,8 +280,10 @@ URL 與參數大小寫敏感（Case sensitive）      路線號 74B ≠ 74b
 | 功能 | 儲存位置 | 內容 |
 |---|---|---|
 | 搜尋歷史 | localStorage（key: `buseta.recent`）| 最近 10 個地標名 + 座標 + 時間戳 |
-| 最愛站 | localStorage（key: `buseta.favorites`）| 站名 + stop ID + 座標 |
-| 一鍵清除 | — | 同時清空兩個 key + 顯示確認對話框 |
+| 常到車站 | localStorage（key: `buseta.favorites`）| 站名 + stop ID + 座標 |
+| 常搭路線（釘選）| localStorage（key: `buseta.favRoutes`）| 路線號 + bound + svc + 終點名 + 時間戳，上限 10 條 |
+| 常搭路線（自動統計）| localStorage（key: `buseta.routeVisits`）| `"路線號\|bound"` → 訪問次數，上限 20 個 key；**首次查看不計**（視為試用），第二次起累加 |
+| 一鍵清除 | — | 同時清空四個 key + 顯示確認對話框 |
 
 **規劃書必須聲明**：無伺服器、無帳號、無 analytics、無追蹤腳本。所有個人資料只存在用戶裝置的 localStorage，清除即永久刪除。
 
@@ -523,7 +525,8 @@ const activeAdapter = TransportAdapters.kmb;
 | **M3 附近站列表** | 範圍切換、合併同名站、Leaflet 圖層 | 可用列表 | 500m 範圍 < 100ms 計算完成 |
 | **M4 ETA 頁** | 輪詢、倒數、去重、null 分流 | 核心功能可用 | 15 秒刷新；無重複 ETA；null 顯示正確 |
 | **M5 PWA** | manifest、Service Worker、離線 fallback | 可安裝 app | 飛航模式可開啟並查站表 |
-| **M6 個人化** | 歷史、最愛、清除 | 設定項 | 清除後 localStorage 完全無痕 |
+| **M6 個人化** | 歷史、常到車站、清除 | 設定項 | 清除後 localStorage 完全無痕 |
+| **M7 路線詳情頁** | 站序渲染、方向分頁、選中站 ETA、常搭路線 | 核心功能擴充 | 路線頁首次進入零網絡請求；單站 ETA 查詢 < 1 KB；O/I 切換零請求 |
 
 **MVP 定義**：M0 - M4 完整。PWA 與個人化可作 M5/M6 迭代。
 

@@ -221,7 +221,212 @@ const favTest = await page.evaluate(() => {
 	B.store.favorites.toggle({ stop: 'TESTID', name: '測試站', lat: 22.3, lng: 114.2 });
 	return { added, has };
 });
-ok(favTest.added && favTest.has, '最愛站新增/切換正常');
+ok(favTest.added && favTest.has, '常到車站新增/切換正常');
+
+/* ---------- 8b. 路線詳情頁 ---------- */
+console.log('\n[8b] 路線詳情頁');
+// [8] 結尾已回到搜尋頁；從「最近搜尋」進入 nearby → ETA 頁 → 點路線行
+await page.click('#recent [data-r="0"]');
+await page.waitForFunction(() => document.getElementById('page-nearby')?.classList.contains('active'), { timeout: 10000 });
+await page.waitForTimeout(400);
+await page.click('#nb-list .stop');
+await page.waitForFunction(() => document.querySelectorAll('#eta-list .eta-row').length > 0, { timeout: 20000 });
+const etaRows = await page.$$('#eta-list .eta-row');
+ok(etaRows.length > 0, 'ETA 路線行可點擊', `${etaRows.length} 行`);
+
+// 記錄點擊前的網絡請求，驗證路線頁首次進入零網絡請求（站序來自離線資料）
+await page.evaluate(() => {
+	window.__netCount = 0;
+	const of = window.fetch;
+	window.fetch = function (...a) { window.__netCount++; return of.apply(this, a); };
+});
+await etaRows[0].click();
+await page.waitForFunction(() => document.getElementById('page-route')?.classList.contains('active'), { timeout: 10000 });
+await page.waitForTimeout(1200);
+
+const rt = await page.evaluate(() => {
+	const rows = [...document.querySelectorAll('#rt-list .seq-row')];
+	return {
+		active: document.getElementById('page-route').classList.contains('active'),
+		no: document.getElementById('rt-no').textContent,
+		dest: document.getElementById('rt-dest').textContent,
+		count: document.getElementById('rt-count').textContent,
+		rowCount: rows.length,
+		dirTabs: [...document.querySelectorAll('#rt-dirs button')].map((b) => b.textContent.trim()),
+		selected: rows.findIndex((r) => r.classList.contains('sel')),
+		hasCode: !!document.querySelector('#rt-list .seq-row .code'),
+		hasTermBadge: !!document.querySelector('#rt-list .tag.gray'),
+		etaBox: !!document.querySelector('#rt-list .seq-eta'),
+		etaText: document.querySelector('#rt-list .seq-eta')?.textContent.replace(/\s+/g, ' ').trim() || '',
+		net: window.__netCount
+	};
+});
+ok(rt.active, '路線頁已開啟');
+ok(/^\d/.test(rt.no), '路線號已顯示', rt.no);
+ok(/往/.test(rt.dest), '終點名已顯示', rt.dest);
+ok(/^\d+ 站$/.test(rt.count), '站數已顯示', rt.count);
+ok(rt.rowCount > 0, '站序已完整列出', `${rt.rowCount} 行`);
+ok(rt.dirTabs.length >= 1 && rt.dirTabs.every((t) => t.includes('往')), '方向分頁以終點名標示', rt.dirTabs.join(' / '));
+ok(rt.selected >= 0, '用戶當前站已自動選中', `第 ${rt.selected + 1} 行`);
+ok(rt.hasCode, '分站編碼以細字顯示');
+ok(rt.hasTermBadge, '總站 badge 已標示');
+ok(rt.net <= 1, '路線頁首次進入近乎零網絡請求（站序來自離線資料）', `${rt.net} 次`);
+ok(/到站時間/.test(rt.etaText), '選中站 ETA 已 inline 展開', rt.etaText.slice(0, 60));
+await page.screenshot({ path: join(SHOTS, '08-route-page.png') });
+
+// ETA 格式合規 + 無負數
+const rtEtas = await page.evaluate(() => [...document.querySelectorAll('#rt-list .seq-eta .eta')].map((e) => e.textContent.replace(/\s+/g, ' ').trim()));
+ok(rtEtas.length > 0, '選中站有 ETA 資料', rtEtas.join(' | '));
+ok(!rtEtas.some((t) => /-\d/.test(t)), '路線頁 ETA 無負數倒數', '');
+
+// 切換方向（零網絡請求）
+const beforeDir = await page.evaluate(() => window.__netCount);
+await page.evaluate(() => { const bs = document.querySelectorAll('#rt-dirs button'); bs[bs.length - 1]?.click(); });
+await page.waitForTimeout(900);
+const afterDir = await page.evaluate(() => ({
+	net: window.__netCount,
+	dir: [...document.querySelectorAll('#rt-dirs button')].findIndex((b) => b.classList.contains('on')),
+	rows: document.querySelectorAll('#rt-list .seq-row').length
+}));
+ok(afterDir.dir >= 0 && afterDir.dir !== 0, '方向切換生效', `第 ${afterDir.dir + 1} 個`);
+ok(afterDir.rows > 0, '切換方向後站序仍完整', `${afterDir.rows} 行`);
+
+// 點另一個站 → ETA 換成該站
+const tapOther = await page.evaluate(() => {
+	const rows = [...document.querySelectorAll('#rt-list .seq-row')];
+	const other = rows.find((r) => !r.classList.contains('sel'));
+	if (!other) return null;
+	const nm = other.querySelector('.t')?.textContent;
+	other.click();
+	return nm;
+});
+await page.waitForTimeout(1200);
+const afterTap = await page.evaluate(() => {
+	const sel = document.querySelector('#rt-list .seq-row.sel .t')?.textContent;
+	const eta = document.querySelector('#rt-list .seq-eta')?.textContent.replace(/\s+/g, ' ').trim();
+	return { sel, eta };
+});
+ok(afterTap.sel === tapOther, '點擊可切換選中站', `${afterTap.sel}`);
+ok(/到站時間/.test(afterTap.eta || ''), '切換站後 ETA 已更新', (afterTap.eta || '').slice(0, 50));
+
+// 常搭路線星號（路線頁）
+const rtStar = await page.evaluate(() => {
+	const btn = document.getElementById('rt-fav');
+	btn.click();
+	const on = btn.classList.contains('on');
+	const list = JSON.parse(localStorage.getItem('buseta.favRoutes') || '[]');
+	btn.click();
+	const off = !btn.classList.contains('on');
+	return { on, off, saved: list.length, key: list[0] ? `${list[0].r}|${list[0].b}|${list[0].s}` : '' };
+});
+ok(rtStar.on && rtStar.off, '常搭路線星號可加/移除');
+ok(rtStar.saved === 1, '常搭路線已寫入 localStorage', rtStar.key);
+
+// 返回按鈕 → 回 ETA 頁
+await page.click('#rt-back');
+await page.waitForTimeout(300);
+const backOk = await page.evaluate(() => ({
+	eta: document.getElementById('page-eta').classList.contains('active'),
+	route: document.getElementById('page-route').classList.contains('active')
+}));
+ok(backOk.eta && !backOk.route, '返回按鈕回到 ETA 頁');
+
+// 常搭路線區塊出現在搜尋頁
+// 先釘選兩條，再經 ETA → nearby → 搜尋頁（nb-back 會觸發 renderRecent 重繪）
+await page.evaluate(() => {
+	const B = window.BusETA;
+	B.store.favRoutes.toggle('1', 'O', 1, '尖沙咀碼頭');
+	B.store.favRoutes.toggle('960P', 'I', 1, '洪水橋');
+});
+await page.click('#eta-back');            // → nearby
+await page.waitForTimeout(200);
+await page.click('#nb-back');             // → 搜尋頁（內含 renderRecent）
+await page.waitForTimeout(400);
+const favRoutesUI = await page.evaluate(() => ({
+	count: document.querySelectorAll('#recent [data-fr]').length,
+	hasTitle: document.body.innerText.includes('常搭路線')
+}));
+ok(favRoutesUI.hasTitle, '搜尋頁已顯示「常搭路線」區塊');
+ok(favRoutesUI.count === 2, '常搭路線清單有 2 條', `${favRoutesUI.count} 條`);
+
+// 從常搭路線進入路線頁（無出發站 → 不預選任何站）
+await page.click('#recent [data-fr="0"]');
+await page.waitForFunction(() => document.getElementById('page-route')?.classList.contains('active'), { timeout: 10000 });
+await page.waitForTimeout(600);
+const fromFav = await page.evaluate(() => ({
+	rows: document.querySelectorAll('#rt-list .seq-row').length,
+	sel: document.querySelectorAll('#rt-list .seq-row.sel').length
+}));
+ok(fromFav.rows > 0, '從常搭路線可進入站序頁', `${fromFav.rows} 行`);
+ok(fromFav.sel === 0, '從常搭清單進入不預選站（無出發站資訊）');
+await page.screenshot({ path: join(SHOTS, '09-route-from-fav.png') });
+await page.evaluate(() => { window.BusETA.store.favRoutes.clear(); window.BusETA.store.routeVisits.clear(); });
+
+/* ---------- 8c. 路線頁資料層單元驗證 ---------- */
+console.log('\n[8c] 路線頁資料層');
+const rtLogic = await page.evaluate(() => {
+	const B = window.BusETA, DB = window.__DB;
+	// 路線 1 O 方向站序
+	const r1 = B.resolveRouteSeq(DB, '1', 'O', 1);
+	const r1i = B.resolveRouteSeq(DB, '1', 'I', 1);
+	// svc fallback：3D/I 請求一個不存在的 svc 應 fallback 到 1
+	const fb = B.resolveRouteSeq(DB, '3D', 'I', 99);
+	// (route,bound,svc) 三元組唯一性
+	let dup = 0;
+	const seen = new Set();
+	for (const [no, bo, sv] of DB.routeList) {
+		const k = `${no}|${bo}|${sv}`;
+		if (seen.has(k)) dup++;
+		seen.add(k);
+	}
+	// 索引完整性：routeIdxByKey 應覆蓋全部 1605 條
+	return {
+		oStops: r1?.stops.length,
+		iStops: r1i?.stops.length,
+		oFirst: r1?.stops[0]?.name,
+		oLast: r1?.stops[r1.stops.length - 1]?.name,
+		iLast: r1i?.stops[r1i.stops.length - 1]?.name,
+		fbOk: !!fb && fb.stops.length > 0,
+		fbDest: DB.routeList[fb?.idx]?.[3],
+		dup,
+		idxSize: DB.routeIdxByKey.size,
+		listSize: DB.routeList.length,
+		hasSingleEta: typeof B.getAdapter('kmb').fetchSingleStopEta === 'function'
+	};
+});
+ok(rtLogic.oStops === 25 && rtLogic.iStops === 25, '路線 1 雙方向各 25 站', `O=${rtLogic.oStops} I=${rtLogic.iStops}`);
+ok(/竹園邨/.test(rtLogic.oFirst || '') && /竹園邨/.test(rtLogic.iLast || ''),
+	'O 首站 = I 尾站（站序方向正確）', `${rtLogic.oFirst} ↔ ${rtLogic.iLast}`);
+ok(/尖沙咀/.test(rtLogic.oLast || ''), 'O 尾站 = 尖沙咀碼頭', rtLogic.oLast);
+ok(rtLogic.fbOk, 'svc 不存在時自動 fallback（svc=99 → 有效站序）', rtLogic.fbDest);
+ok(rtLogic.dup === 0, '(route,bound,svc) 三元組無重複', `重複 ${rtLogic.dup} 個`);
+ok(rtLogic.idxSize === rtLogic.listSize, 'routeIdxByKey 覆蓋全部路線變體', `${rtLogic.idxSize}/${rtLogic.listSize}`);
+ok(rtLogic.hasSingleEta, 'adapter 提供單站路線 ETA 方法');
+
+// routeVisits 門檻：首次不計，第二次起累加
+const visitTest = await page.evaluate(() => {
+	const B = window.BusETA;
+	B.store.routeVisits.clear();
+	const a = B.store.routeVisits.visit('1', 'O');
+	const b = B.store.routeVisits.visit('1', 'O');
+	const c = B.store.routeVisits.visit('1', 'O');
+	const top = B.store.routeVisits.top(5);
+	B.store.routeVisits.clear();
+	return { a, b, c, topCount: top.length, topN: top[0]?.count };
+});
+ok(visitTest.a.counted === false && visitTest.b.counted === true, '首次查看不計入常搭，第二次起才累加', `1→${visitTest.b.count}→${visitTest.c.count}`);
+ok(visitTest.topCount >= 1 && visitTest.topN === 3, '達門檻的項目按次數排序', `top ${visitTest.topCount} 條，最高 ${visitTest.topN} 次`);
+
+// favRoutes 上限
+const capTest = await page.evaluate(() => {
+	const B = window.BusETA;
+	B.store.favRoutes.clear();
+	for (let i = 0; i < 15; i++) B.store.favRoutes.toggle('R' + i, 'O', 1, '測試');
+	const n = B.store.favRoutes.load().length;
+	B.store.favRoutes.clear();
+	return n;
+});
+ok(capTest === 10, '常搭路線上限 10 條', `實際 ${capTest} 條`);
 
 /* ---------- 9. PWA ---------- */
 console.log('\n[9] PWA');

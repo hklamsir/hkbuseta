@@ -193,6 +193,8 @@ body {
 .result:active { background: var(--surface-2); }
 .result .body { flex: 1; min-width: 0; }
 .result .name { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 常搭路線：路線號 + 往終點名 */
+.result .name .sub2 { font-weight: 400; font-size: 12px; color: var(--text-2); }
 .result .meta { font-size: 12px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
 .result .chev { width: 16px; height: 16px; stroke: var(--text-3); fill: none; stroke-width: 2; flex-shrink: 0; }
 
@@ -629,3 +631,144 @@ body {
 	#app { box-shadow: 0 0 0 1px var(--border); }
 	#map { max-width: none; }
 }
+
+/* ============ 路線詳情頁 ============ */
+
+/* stop-hero 內的星號靠右（沿用現有 .star class，僅定位） */
+.stop-hero { position: relative; padding-right: 44px; }
+.stop-hero > .star { position: absolute; top: 10px; right: 10px; }
+
+.route-hero {
+	background: var(--surface);
+	padding: 12px 14px;
+	border-bottom: 1px solid var(--border);
+}
+.route-hero .no {
+	font-size: 26px;
+	font-weight: 700;
+	color: var(--brand);
+	line-height: 1.1;
+	letter-spacing: -.02em;
+	font-variant-numeric: tabular-nums;
+}
+.route-hero .meta {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex-wrap: wrap;
+	margin-top: 4px;
+	font-size: 13px;
+	color: var(--text-2);
+}
+.route-hero .meta .ct { font-size: 12px; color: var(--text-3); margin-left: auto; }
+
+/* 方向分頁 */
+.dir-tabs { display: flex; gap: 6px; flex: 1; min-width: 0; }
+.dir-tabs button {
+	flex: 1 1 0;
+	min-width: 0;
+	border: 1px solid var(--border);
+	background: var(--surface);
+	border-radius: 8px;
+	padding: 8px 6px;
+	font-family: inherit;
+	font-size: 12px;
+	font-weight: 500;
+	color: var(--text-2);
+	cursor: pointer;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.dir-tabs button.on { background: var(--brand); border-color: var(--brand); color: #fff; font-weight: 600; }
+.dir-tabs button:active { background: var(--brand-soft); }
+
+/* 已切換到最近車站等提示 */
+.seq-hint {
+	margin: 10px 14px 0;
+	padding: 8px 10px;
+	background: var(--brand-soft);
+	border-radius: 8px;
+	font-size: 12px;
+	color: var(--brand);
+	line-height: 1.5;
+}
+
+/* 站序列表 */
+.seq-list { padding: 0 0 24px; background: var(--surface); }
+
+.seq-row {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	width: 100%;
+	padding: 10px 14px 10px 12px;
+	background: none;
+	border: 0;
+	border-bottom: 1px solid var(--border);
+	text-align: left;
+	font-family: inherit;
+	color: var(--text);
+	cursor: pointer;
+	border-left: 3px solid transparent;
+}
+.seq-row:active { background: var(--surface-2); }
+.seq-row.sel {
+	background: var(--brand-soft);
+	border-left-color: var(--brand);
+}
+.seq-row.term .no { color: var(--muted); }
+
+.seq-row .no {
+	font-size: 12px;
+	font-weight: 600;
+	color: var(--text-3);
+	min-width: 20px;
+	flex-shrink: 0;
+	text-align: right;
+	font-variant-numeric: tabular-nums;
+}
+.seq-row .body { flex: 1 1 auto; min-width: 0; }
+.seq-row .nm {
+	font-size: 14px;
+	line-height: 1.35;
+	display: flex;
+	align-items: baseline;
+	gap: 5px;
+	flex-wrap: wrap;
+}
+.seq-row .nm .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+/* 分站編碼以細字灰色顯示（現場辨認行車位用） */
+.seq-row .nm .code { font-size: 11px; color: var(--text-3); flex-shrink: 0; }
+.seq-row .tags { display: flex; gap: 5px; margin-top: 3px; flex-wrap: wrap; }
+.seq-row .jump {
+	flex-shrink: 0;
+	width: 26px;
+	height: 26px;
+	border: 0;
+	background: none;
+	padding: 0;
+	cursor: pointer;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: 6px;
+}
+.seq-row .jump svg { width: 15px; height: 15px; fill: none; stroke: var(--text-3); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.seq-row .jump:active { background: rgba(0, 0, 0, .06); }
+
+/* 選中站 inline 展開的 ETA 區 */
+.seq-eta {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 9px 14px 11px 45px;
+	background: var(--brand-soft);
+	border-bottom: 1px solid var(--border);
+	border-left: 3px solid var(--brand);
+	font-size: 12px;
+}
+.seq-eta .lb { color: var(--text-2); flex-shrink: 0; }
+.seq-eta .eta-list { margin-left: auto; }
+.seq-eta .none { color: var(--text-3); font-size: 12px; margin-left: auto; text-align: right; }
+.seq-eta .skel { margin-left: auto; }

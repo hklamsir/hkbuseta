@@ -25,10 +25,23 @@
 		etaToken: 0,
 		timer: null,
 		lastFetch: 0,
-		tickTimer: null
+		tickTimer: null,
+
+		/* 路線詳情頁 */
+		route: null,        // { no, bound, svc, dest }
+		routeStops: [],     // 當前方向的站序（離線，含 seq 與 stopId）
+		routeDir: null,     // 當前顯示方向 'O'|'I'
+		routeSel: null,     // 選中站 { stop, seq, stopId }
+		routeEta: [],       // 選中站 /eta/ 回應（已過濾方向）
+		routeAbort: null,
+		routeToken: 0,
+		routeTimer: null,
+		routeTick: null,
+		routeLastFetch: 0
 	};
 
 	const POLL_MS = 15000;   // 規劃書 §5.4
+	const ROUTE_MAX_AUTO = 5;   // 常搭路線：自動統計區只顯示 top N
 	const $ = (id) => document.getElementById(id);
 	const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
@@ -175,11 +188,36 @@
 		$('recent').innerHTML = '';
 	}
 
-	/* 歷史 + 最愛 */
+	/* 歷史 + 常搭路線 + 常到車站 */
 	function renderRecent() {
 		const r = B.store.recent.load();
 		const f = B.store.favorites.load();
+		const fr = B.store.favRoutes.load();
 		let html = '';
+
+		// 常搭路線：手動釘選（永在最前）+ 自動統計（未釘選且達門檻者）
+		const pinned = fr.map((x) => ({ ...x, pinned: true }));
+		const pinnedKeys = new Set(fr.map((x) => `${x.r}|${x.b}`));
+		const auto = B.store.routeVisits.top(20)
+			.filter((x) => !pinnedKeys.has(`${x.route}|${x.bound}`))
+			.slice(0, ROUTE_MAX_AUTO)
+			.map((x) => ({
+				r: x.route, b: x.bound, s: null, d: routeDestName(x.route, x.bound),
+				count: x.count, pinned: false
+			}));
+		const favRoutes = [...pinned, ...auto];
+
+		if (favRoutes.length) {
+			html += `<div class="section"><div class="section-title">常搭路線 <span class="count">${favRoutes.length} 條</span></div><div class="card">` +
+				favRoutes.map((x, i) => `<button class="result" data-fr="${i}">
+					<svg style="width:18px;height:18px;flex-shrink:0;${x.pinned ? 'fill:#f5a623;stroke:#f5a623' : 'fill:none;stroke:var(--text-3);stroke-width:2;stroke-linejoin:round'}"><use href="#i-star"/></svg>
+					<span class="body">
+						<span class="name">${esc(x.r)} <span class="sub2">往 ${esc(x.d || '—')}</span></span>
+						${x.count ? `<span class="meta">已查看 ${x.count} 次</span>` : ''}
+					</span>
+					<svg class="chev"><use href="#i-chev"/></svg></button>`).join('') +
+				'</div></div>';
+		}
 
 		if (r.length) {
 			html += `<div class="section"><div class="section-title">最近搜尋</div><div class="card">` +
@@ -190,7 +228,7 @@
 				'</div></div>';
 		}
 		if (f.length) {
-			html += `<div class="section"><div class="section-title">最愛巴士站 <span class="count">${f.length} 個</span></div><div class="card">` +
+			html += `<div class="section"><div class="section-title">常到車站 <span class="count">${f.length} 個</span></div><div class="card">` +
 				f.map((x) => `<button class="result" data-f="${esc(x.stop)}">
 					<svg style="width:18px;height:18px;fill:#f5a623;stroke:#f5a623;flex-shrink:0"><use href="#i-star"/></svg>
 					<span class="body"><span class="name">${esc(x.name)}</span></span>
@@ -199,6 +237,16 @@
 		}
 		$('recent').innerHTML = html;
 
+		$('recent').querySelectorAll('[data-fr]').forEach((b) => b.addEventListener('click', async () => {
+			const x = favRoutes[+b.dataset.fr];
+			await boot();
+			if (!DB) return;
+			B.store.routeVisits.visit(x.r, x.b);
+			openRoute({
+				no: x.r, dir: x.b, svc: x.s || 1, dest: x.d || '',
+				seqs: null   // 從常搭清單進入無特定出發站 → 只顯示全線站序
+			});
+		}));
 		$('recent').querySelectorAll('[data-r]').forEach((b) => b.addEventListener('click', () => {
 			const x = r[+b.dataset.r];
 			openNearby({ name: x.name, lat: x.lat, lng: x.lng });
@@ -209,10 +257,20 @@
 		}));
 	}
 
+	/** 從離線 routeList 取某路線某方向的終點名 */
+	function routeDestName(routeNo, bound) {
+		for (const [no, b, , dest] of DB.routeList) {
+			if (no === routeNo && b === bound) return dest;
+		}
+		return '';
+	}
+
 	$('clear-data').addEventListener('click', () => {
-		if (!confirm('確定清除所有搜尋記錄與最愛站？此操作無法復原。')) return;
+		if (!confirm('確定清除所有搜尋記錄、常搭路線與常到車站？此操作無法復原。')) return;
 		B.store.recent.clear();
 		B.store.favorites.clear();
+		B.store.favRoutes.clear();
+		B.store.routeVisits.clear();
 		renderRecent();
 		toast('已清除');
 	});
@@ -316,18 +374,38 @@
 
 	async function openEta(stop) {
 		await boot();
+		stopRoutePolling();      // 路線頁的輪詢要先停，避免背景跑無用請求
 		stopPolling();          // 先停上一輪，避免請求堆疊
 		state.stop = stop;
 		$('eta-name').textContent = stop.name;
 		$('eta-coord').textContent =
 			`${stop.lat.toFixed(5)}, ${stop.lng.toFixed(5)}` + (stop.distance != null ? ` · 距離 ${stop.distance} 米` : '');
 		$('eta-sub').textContent = stop.name;
+		syncFavBtn();
 		$('eta-list').innerHTML = '<div class="card" style="margin:0 14px"><div class="skel"><div class="l" style="width:40%"></div></div><div class="skel"><div class="l" style="width:55%"></div></div><div class="skel"><div class="l" style="width:45%"></div></div></div>';
 		go('eta');
 		state.lastFetch = 0;
 		startPolling();
 		fetchEta();
 	}
+
+	/** 同步 ETA 頁「常到車站」星號狀態（啟動原本只有資料層、UI 無入口的功能） */
+	function syncFavBtn() {
+		const s = state.stop;
+		if (!s) return;
+		const on = B.store.favorites.has(s.stop);
+		$('eta-fav').classList.toggle('on', on);
+		$('eta-fav').setAttribute('aria-label', on ? '取消常到車站' : '加入常到車站');
+	}
+
+	$('eta-fav').addEventListener('click', () => {
+		const s = state.stop;
+		if (!s) return;
+		B.store.favorites.toggle({ stop: s.stop, name: s.name, lat: s.lat, lng: s.lng });
+		syncFavBtn();
+		toast(B.store.favorites.has(s.stop) ? '已加入常到車站' : '已移除');
+		renderRecent();
+	});
 
 	async function fetchEta() {
 		if (!state.stop) return;
@@ -480,7 +558,12 @@
 					return `<span class="eta ${f.tone}" data-etas="${list.indexOf(o)}"${tip}>
 						<span class="t">${esc(f.text)}</span><span class="c">${esc(f.sub)}</span></span>`;
 				}).join('');
-				return `<button class="eta-row" data-ids="${esc(g.map((o) => o.seq).join(','))}">
+				// data-r 帶齊路線／方向／svc／該行全部 seq 與 stop ID 給路線頁用
+				const stopIds = [...new Set(g.map((o) => o.stop).filter(Boolean))];
+				return `<button class="eta-row" data-ids="${esc(g.map((o) => o.seq).join(','))}"
+					data-stops="${esc(stopIds.join(','))}"
+					data-r="${esc(g[0].route)}" data-dir="${esc(g[0].dir)}"
+					data-svc="${esc(mainSvc == null ? 1 : mainSvc)}" data-dest="${esc(dest)}">
 					<span class="route-no">${esc(g[0].route)}</span>
 					<span class="dest">${esc(dest)}${svcTag}${multiTag}</span>
 					<span class="eta-list">${etas}</span>
@@ -502,6 +585,21 @@
 			el.className = 'eta';
 		});
 		tickCountdown();
+
+		// 路線行可點 → 進路線詳情頁（.eta-row 本來就是 button，零 UI 改動）
+		$('eta-list').querySelectorAll('.eta-row').forEach((b) => {
+			b.addEventListener('click', () => {
+				openRoute({
+					no: b.dataset.r,
+					dir: b.dataset.dir,
+					svc: +b.dataset.svc || 1,
+					dest: b.dataset.dest,
+					seqs: b.dataset.ids.split(',').map(Number).filter((n) => !isNaN(n)),
+					// 合併站會帶多個 stop ID（實測「黃大仙中心」同站最多 6 個行車位）
+					stopIds: (b.dataset.stops || '').split(',').filter(Boolean)
+				});
+			});
+		});
 	}
 
 	function emptyBox(t, d) {
@@ -509,6 +607,389 @@
 			<svg class="ico"><use href="#i-bus"/></svg>
 			<div class="t">${esc(t)}</div><div class="d">${esc(d)}</div>
 		</div></div></div>`;
+	}
+
+	/* ============ M7 路線詳情頁 ============ */
+
+	$('rt-back').addEventListener('click', () => { stopRoutePolling(); go('eta'); });
+	$('rt-refresh').addEventListener('click', () => { state.routeLastFetch = 0; fetchRouteStopEta(); });
+	$('rt-fav').addEventListener('click', () => {
+		const r = state.route;
+		if (!r) return;
+		const on = B.store.favRoutes.toggle(r.no, r.bound, r.svc, r.dest);
+		syncRouteFavBtn();
+		toast(on ? '已加入常搭路線' : '已移除');
+		renderRecent();
+	});
+
+	function syncRouteFavBtn() {
+		const r = state.route;
+		if (!r) return;
+		const on = B.store.favRoutes.has(r.no, r.bound, r.svc);
+		$('rt-fav').classList.toggle('on', on);
+		$('rt-fav').setAttribute('aria-label', on ? '取消常搭路線' : '加入常搭路線');
+	}
+
+	/**
+	 * 進入路線詳情頁。
+	 * 站序完全來自離線 routeSeqs → 首次進入零網絡請求（可離線使用）。
+	 * @param {{no:string,dir:string,svc:number,dest:string,seqs:number[]}} opts
+	 */
+	function openRoute(opts) {
+		boot().then(() => {
+		if (!DB) return;
+		stopPolling();
+		stopRoutePolling();
+
+		// 清掉上一條路線的選中狀態，避免 remapByStopId 拿舊資料對應
+		state.routeSel = null;
+		state.routeEta = [];
+		state.route = { no: opts.no, bound: opts.dir, svc: opts.svc, dest: opts.dest };
+
+		// 自動訪問統計：首次不計（視為試用），第二次起才累加
+		const v = B.store.routeVisits.visit(opts.no, opts.dir);
+
+		$('rt-no').textContent = opts.no;
+		$('rt-sub').textContent = '';
+		syncRouteFavBtn();
+		go('route');
+
+		// 構建方向分頁（零網絡）
+		buildDirTabs(opts.no, opts.dir, opts.svc);
+		setRouteDir(opts.dir, opts.svc, { seqs: opts.seqs, stopIds: opts.stopIds },
+			!v.counted ? '首次查看這條路線，第二次起才會記入常搭' : null);
+		});
+	}
+
+	/** 方向分頁：列出該路線號所有方向的終點名 */
+	function buildDirTabs(routeNo, activeDir, svc) {
+		const box = $('rt-dirs');
+		const dirs = new Map();
+		for (let i = 0; i < DB.routeList.length; i++) {
+			const [no, bound, s, dest] = DB.routeList[i];
+			if (no !== routeNo) continue;
+			// 同一方向多 svc 時，優先用傳入的 svc，否則取第一個
+			const cur = dirs.get(bound);
+			if (!cur || (cur.svc !== svc && s === svc)) dirs.set(bound, { svc: s, dest });
+		}
+		state.routeDirs = dirs;
+		const html = [...dirs.entries()].map(([bound, info]) =>
+			`<button data-d="${esc(bound)}" data-s="${esc(info.svc)}" class="${bound === activeDir ? 'on' : ''}"
+				title="往 ${esc(info.dest)}">往 ${esc(info.dest)}</button>`
+		).join('');
+		box.innerHTML = html;
+		box.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => {
+			setRouteDir(b.dataset.d, +b.dataset.s || 1, null, null);
+		}));	}
+
+	/**
+	 * 切換方向（或初次載入）。
+	 * @param {string} dir 'O'|'I'
+	 * @param {number} svc
+	 * @param {number[]|null} seqs 由 ETA 頁帶入的候選 seq（初次載入用）
+	 * @param {string|null} hint 要顯示的提示
+	 */
+function setRouteDir(dir, svc, ctx, hint) {
+		state.routeDir = dir;
+		state.route.bound = dir;
+		state.route.svc = svc;
+
+		$('rt-dirs').querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.d === dir));
+
+		// resolveRouteSeq 內建 svc fallback：原值 → 1 → 同方向任一變體
+		const res = B.resolveRouteSeq(DB, state.route.no, dir, svc);
+		if (!res || !res.stops.length) {
+			$('rt-list').innerHTML = emptyBox('離線資料未有這條路線的站序',
+				'官方每日 05:00 更新路線資料，請稍後再試或重新整理頁面。');
+			$('rt-hint').hidden = true;
+			return;
+		}
+		state.routeStops = res.stops;
+
+		const meta = DB.routeList[res.idx];
+		state.route.dest = meta[3];
+		state.route.svc = meta[2];
+		$('rt-dest').textContent = `往 ${meta[3]}`;
+		$('rt-count').textContent = `${res.stops.length} 站`;
+		const svcTag = $('rt-svc');
+		if (meta[2] && meta[2] !== 1) {
+			svcTag.hidden = false;
+			svcTag.textContent = B.SERVICE_LABELS[meta[2]] || `類型 ${meta[2]}`;
+		} else {
+			svcTag.hidden = true;
+		}
+
+		renderRouteSeq();
+
+		// 決定選中站：切換方向時用 stopId 重映射，初次進入用帶入的 stopId/seq
+		let picked;
+		if (ctx && (ctx.stopIds?.length || ctx.seqs?.length)) {
+			picked = pickBySeqs(res.stops, ctx.seqs, ctx.stopIds);
+			state.routeHint = hint || (picked?.altSeqs?.length
+				? `這條路線會行兩次經過此站（第 ${picked.altSeqs.join('、')} 站）` : null);
+		} else {
+			picked = remapByStopId();
+			state.routeHint = hint || (picked?.nearest ? '已切換至這條路線上距離最近的車站' : null);
+		}
+		state.routeSel = null;
+		state.routeEta = [];
+		showHint(state.routeHint);
+		if (picked) selectStop(picked, { scroll: true });
+	}
+
+	/**
+	 * 決定選中站（初次進入）。
+	 * 優先用 stop ID 精確匹配 —— 比 seq 穩健，因為 resolveRouteSeq 可能走過
+	 * svc fallback（此時離線站序的 seq 與 API 的 seq 不同）。
+	 * 循環線（實測 114 條，如 3S / 5D）頭尾會經過同一 stopId，
+	 * 多個 stopId 時取首個並記下其餘供提示。
+	 */
+	function pickBySeqs(stops, seqs, stopIds) {
+		if (stopIds && stopIds.length) {
+			const hit = stops.find((s) => stopIds.includes(s.stop));
+			if (hit) {
+				hit.altSeqs = [];
+				return hit;
+			}
+		}
+		const hits = seqs ? stops.filter((s) => seqs.includes(s.seq)) : [];
+		if (!hits.length) return null;
+		// 同 stopId 多 seq（循環線）→ 取首個為代表
+		const byStop = new Map();
+		for (const h of hits) if (!byStop.has(h.stop)) byStop.set(h.stop, []);
+		for (const h of hits) byStop.get(h.stop).push(h.seq);
+		const first = hits[0];
+		first.altSeqs = byStop.get(first.stop).filter((q) => q !== first.seq);
+		return first;
+	}
+
+	/**
+	 * 切換方向後重新映射選中站。
+	 * 用 stopId 精確對應；對應唔到就取同路線上距離最近的站。
+	 */
+	function remapByStopId() {
+		const sel = state.routeSel;
+		// 從常搭清單進入時上一站的 state 已失效，不能拿來對應
+		if (!sel || !sel.stop || !Number.isFinite(sel.lat)) return null;
+		const stops = state.routeStops;
+		const exact = stops.find((s) => s.stop === sel.stop);
+		if (exact) return exact;
+		// 就近替代：以原站座標找最近（分站編碼不同的同一站名也算合理替代）
+		let best = null, bestD = Infinity;
+		for (const s of stops) {
+			if (!s.lat) continue;
+			const d = B.haversine(sel.lat, sel.lng, s.lat, s.lng);
+			if (d < bestD) { bestD = d; best = s; }
+		}
+		if (!best) return stops[0] || null;
+		best.nearest = true;
+		return best;
+	}
+
+	function showHint(text) {
+		const el = $('rt-hint');
+		if (!text) { el.hidden = true; el.textContent = ''; return; }
+		el.hidden = false;
+		el.textContent = text;
+	}
+
+	/** 渲染全線站序（離線） */
+	function renderRouteSeq() {
+		const stops = state.routeStops;
+		const sel = state.routeSel;
+		const n = stops.length;
+		const last = n - 1;
+
+		const rows = stops.map((s, i) => {
+			const isSel = sel && sel.seq === s.seq && sel.stop === s.stop;
+			const term = i === 0 || i === last;
+			return `<button class="seq-row${isSel ? ' sel' : ''}${term ? ' term' : ''}" data-i="${i}">
+				<span class="no">${s.seq}</span>
+				<span class="body">
+					<span class="nm">
+						<span class="t">${esc(splitCode(s.name).base)}</span>
+						${codeTag(s.name)}
+					</span>
+					${tagsFor(s, i === 0, i === last)}
+				</span>
+				<span class="jump" data-jump="${i}" role="button" aria-label="查看 ${esc(s.name)} 到站時間">
+					<svg><use href="#i-arrow-right"/></svg>
+				</span>
+			</button>`;
+		}).join('');
+
+		$('rt-list').innerHTML = `<div class="seq-list">${rows}</div>`;
+
+		$('rt-list').querySelectorAll('.seq-row').forEach((b) => b.addEventListener('click', (e) => {
+			// 站名右邊的 → 跳去該站 ETA 頁
+			const jump = e.target.closest('[data-jump]');
+			const i = +b.dataset.i;
+			const s = state.routeStops[i];
+			if (jump) {
+				stopRoutePolling();
+				openEta({ stop: s.stop, name: s.name, lat: s.lat, lng: s.lng });
+				return;
+			}
+			selectStop(s);
+		}));
+	}
+
+	/**
+	 * 站名尾部的分站編碼（如「竹園邨總站 (WT916)」）。
+	 * 主名稱只顯示乾淨站名，編碼另以細字灰色顯示（現場辨認行車位用）。
+	 */
+	function splitCode(name) {
+		const m = String(name).match(/^(.*?)\s*(\([^)]{2,}\))\s*$/);
+		return m ? { base: m[1].trim(), code: m[2] } : { base: String(name), code: '' };
+	}
+	function codeTag(name) {
+		const { code } = splitCode(name);
+		return code ? `<span class="code">${esc(code)}</span>` : '';
+	}
+
+	function tagsFor(s, isFirst, isLast) {
+		const t = [];
+		if (isFirst) t.push('<span class="tag gray">總站</span>');
+		if (isLast && !isFirst) t.push('<span class="tag gray">總站</span>');
+		return t.length ? `<span class="tags">${t.join('')}</span>` : '';
+	}
+
+	/** 選中站：再次點同一行 = 收埋 */
+	function selectStop(s, opt) {
+		const opts = opt || {};
+		if (!s) return;
+		if (state.routeSel && state.routeSel.seq === s.seq && state.routeSel.stop === s.stop) {
+			state.routeSel = null;
+			state.routeEta = [];
+			showHint(null);
+			renderRouteSeq();
+			$('rt-status').textContent = '';
+			$('rt-stamp').textContent = '';
+			return;
+		}
+		state.routeSel = s;
+		state.routeEta = [];
+		renderRouteSeq();
+		// 選中站可能與先前提示所指的不同（例如 hint 是「已切換至最近車站」）
+		if ($('rt-hint').textContent !== state.routeHint) showHint(state.routeHint || null);
+		if (opts.scroll) {
+			const el = $('rt-list').querySelector('.seq-row.sel');
+			if (el) el.scrollIntoView({ block: 'center', behavior: 'auto' });
+		}
+		fetchRouteStopEta();
+	}
+
+	/**
+	 * 查選中站 ETA。
+	 * 用 /eta/{stop}/{route}/{svc}（實測 961 bytes），不用 route-eta（13-43 KB）。
+	 * 回應會混合方向 → 必須按 (dir, seq) 過濾。
+	 */
+	async function fetchRouteStopEta() {
+		const sel = state.routeSel;
+		const r = state.route;
+		if (!sel || !r) return;
+		if (typeof adapter.fetchSingleStopEta !== 'function') {
+			showHint('此營辦商未支援單站路線 ETA（離線站序仍可用）');
+			$('rt-status').textContent = '';
+			return;
+		}
+
+		// 每查一個新站就重啟輪詢，避免上一站的 fetchRouteStopEta 立刻被 interval 再觸發
+		startRoutePolling();
+		state.routeAbort?.abort();
+		const ac = new AbortController();
+		state.routeAbort = ac;
+		const token = ++state.routeToken;
+		$('rt-refresh').classList.add('spin');
+		$('rt-refresh').disabled = true;
+		renderSeqEtaBox('load');
+
+		try {
+			const rows = await adapter.fetchSingleStopEta(sel.stop, r.no, r.svc, ac.signal);
+			if (token !== state.routeToken) return;
+			// 按 (dir, seq) 過濾：同一物理 stop 可能同時是該路線 O 與 I 方向的站
+			// 實測 /eta/竹園邨總站/1/1 → O seq 1 + I seq 25 各 3 班
+			const kept = rows.filter((x) => x.dir === state.routeDir && String(x.seq) === String(sel.seq));
+			state.routeEta = B.normalizeEta(kept);
+			state.routeLastFetch = Date.now();
+			renderSeqEtaBox('done');
+		} catch (e) {
+			if (e.name === 'AbortError') return;
+			if (token !== state.routeToken) return;
+			state.routeEta = [];
+			renderSeqEtaBox('error');
+		} finally {
+			if (token === state.routeToken) {
+				$('rt-refresh').classList.remove('spin');
+				$('rt-refresh').disabled = false;
+			}
+		}
+	}
+
+	/** 選中站下方 inline 的 ETA 區塊 */
+	function renderSeqEtaBox(mode) {
+		const sel = state.routeSel;
+		if (!sel) return;
+		const prev = $('rt-list').querySelector('.seq-eta');
+		if (prev) prev.remove();
+		const row = $('rt-list').querySelector('.seq-row.sel');
+		if (!row) return;
+
+		const box = document.createElement('div');
+		box.className = 'seq-eta';
+
+		if (mode === 'load') {
+			box.innerHTML = '<span class="lb">到站時間</span><span class="skel"><div class="skel"><div class="l" style="width:80px"></div></div></span>';
+		} else if (mode === 'error') {
+			box.innerHTML = `<span class="lb">到站時間</span><span class="none">查詢失敗，請檢查網絡</span>`;
+		} else {
+			const list = state.routeEta;
+			const stamp = list.find((o) => o.dataTs);
+			// 排序：有時間的按時間升序（用戶習慣由早到遲），null 排後
+			const sorted = [...list].sort((a, b) => (a.ts === null ? 1 : 0) - (b.ts === null ? 1 : 0) || (a.ts || 0) - (b.ts || 0));
+			const etas = sorted.map((o) => {
+				const f = B.formatEta(o);
+				const tip = f.full ? ` title="${esc(f.full)}"` : '';
+				return `<span class="eta ${f.tone}" data-rseq="${state.routeEta.indexOf(o)}"${tip}>
+					<span class="t">${esc(f.text)}</span><span class="c">${esc(f.sub)}</span></span>`;
+			}).join('');
+			box.innerHTML = `<span class="lb">到站時間</span>` +
+				(etas ? `<span class="eta-list">${etas}</span>`
+				      : `<span class="none">${navigator.onLine ? '此站暫時冇到站預報' : '離線中，無法顯示實時到站時間'}</span>`);
+			$('rt-status').textContent = `每 ${POLL_MS / 1000} 秒更新`;
+			$('rt-stamp').textContent = stamp ? `資料時間 ${stamp.dataTs.slice(11, 16)}` : '';
+		}
+		row.after(box);
+	}
+
+	/** 路線頁獨立 tick（資料源不同於 ETA 頁，用 data-rseq 分開） */
+	function tickRouteCountdown() {
+		if (!onPage('route') || !state.routeEta.length) return;
+		const now = Date.now();
+		for (const el of document.querySelectorAll('[data-rseq]')) {
+			const o = state.routeEta[+el.dataset.rseq];
+			if (!o) continue;
+			const f = B.formatEta(o, now);
+			el.querySelector('.t').textContent = f.text;
+			el.querySelector('.c').textContent = f.sub;
+			el.className = 'eta ' + f.tone;
+		}
+	}
+
+	function startRoutePolling() {
+		stopRoutePolling();
+		state.routeTimer = setInterval(() => {
+			if (document.visibilityState === 'visible' && state.routeSel &&
+				Date.now() - state.routeLastFetch >= POLL_MS) fetchRouteStopEta();
+		}, POLL_MS);
+		state.routeTick = setInterval(tickRouteCountdown, 1000);
+	}
+
+	function stopRoutePolling() {
+		clearInterval(state.routeTimer);
+		clearInterval(state.routeTick);
+		state.routeTimer = state.routeTick = null;
+		state.routeAbort?.abort();
 	}
 
 	/* ============ 地圖（M3 附屬） ============ */
@@ -639,9 +1120,10 @@ $('map-close').addEventListener('click', () => $('map').classList.remove('on'));
 
 	// 背景時暫停輪詢（規劃書 §4.4）
 	document.addEventListener('visibilitychange', () => {
-		if (document.visibilityState === 'visible' && onPage('eta')) {
-			if (Date.now() - state.lastFetch >= POLL_MS) fetchEta();
-		}
+		if (document.visibilityState !== 'visible') return;
+		if (onPage('eta') && Date.now() - state.lastFetch >= POLL_MS) fetchEta();
+		// 路線頁只在有選中站時輪詢（選中站為 null 時沒有可查的資料）
+		if (onPage('route') && state.routeSel && Date.now() - state.routeLastFetch >= POLL_MS) fetchRouteStopEta();
 	});
 
 	/* Service Worker（規劃書 §5.5） */

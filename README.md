@@ -1,6 +1,6 @@
 # BusETA
 
-輸入一個香港地標（商場、大廈、機場），揀一個搜尋半徑，列出範圍內所有**九巴及龍運**巴士站，再逐站睇實時到站時間。
+輸入一個香港地標（商場、大廈、碼頭、機場），揀一個搜尋半徑，列出範圍內所有**九巴及龍運**巴士站，再逐站睇實時到站時間。點路線號可睇全線站序。
 
 純前端、零後端、零 API key。已離線打包全港 6,753 個車站與 1,605 條路線，只有實時到站時間需要網絡。
 
@@ -43,13 +43,13 @@ node scripts/bump-sw.mjs
 
 ```
 public/
-├── index.html          三頁單頁應用（搜尋 / 附近站 / ETA）
+├── index.html          四頁單頁應用（搜尋 / 附近站 / ETA / 路線詳情）
 ├── manifest.json       PWA manifest
 ├── sw.js               Service Worker（App Shell + ETA Network-First）
 ├── css/app.css
 ├── js/
 │   ├── data.js         資料層：gzip 載入、索引、Haversine、ETA 格式化、adapter 註冊
-│   └── app.js          應用邏輯：搜尋、附近站、ETA 輪詢、地圖
+│   └── app.js          應用邏輯：搜尋、附近站、ETA 輪詢、路線站序、地圖
 ├── vendor/leaflet.*    Leaflet 1.9.4（本地化，支援 PWA 離線）
 ├── data/
 │   ├── stops.json.gz   車站表 178 KB
@@ -61,7 +61,7 @@ scripts/
 ├── build-data.mjs      離線資料打包（4.24MB → 339 KB，8%）
 ├── bump-sw.mjs         Service Worker 版本戳（部署前必須跑；純內容 hash，無變不改 sw.js）
 ├── serve.mjs           零依賴開發伺服器
-├── verify.mjs          Playwright 端到端驗證（46 項）
+├── verify.mjs          Playwright 端到端驗證（81 項）
 └── verify-offline.mjs  離線模式驗證（13 項）
     verify-sw-version.mjs  SW 版本追蹤驗證
 
@@ -107,11 +107,37 @@ BusETA.registerAdapter({
   loadStatic(),                 // 載入離線資料
   fetchStopEta(stopId, signal), // 單站 ETA
   fetchRouteEta(route, svc),    // 全線 ETA
+  fetchSingleStopEta(stopId, route, svc, signal),  // 單站+單線 ETA（optional，路線頁用）
   searchPlace(query, signal)    // 地標搜尋
 });
 ```
 
 新增城巴／新巴只需註冊新 adapter，UI 與搜尋邏輯不需改動。唯一要處理的是**多營辦商 stop ID 對齊**（同一物理站可能有兩個系統的 ID）。
+
+> `fetchSingleStopEta` **刻意不列入 `registerAdapter` 必填清單** —— adapter 介面不應因可選功能而收窄未來擴充點。未實作該方法的 adapter，路線頁仍可正常顯示離線站序，只是不顯示選中站 ETA。
+
+### 路線詳情頁（M7）
+
+點 ETA 頁的路線行即可進入，睇全線由第一站到最後一站的站序。
+
+| 設計點 | 實測依據 |
+|---|---|
+| **站序完全來自離線資料** | `routeSeqs[routeIdx]` 已有完整站序 → 首次進入**零網絡請求**，繼承「離線可查路線」定位 |
+| **ETA 只查選中站** | `/eta/{stop}/{route}/{svc}` 實測 **961 bytes**；`route-eta/{route}/{svc}` 實測 **13–43 KB**（差 30 倍，後者會把 99% 資料丟掉） |
+| **按 `(dir, seq)` 過濾** | 單站端點會混合方向：實測 `/eta/竹園邨總站/1/1` 回 6 rows = O seq 1 + I seq 25 各 3 班 |
+| **完整三元組索引** | 221 組 `(route,bound)` 有多個 svc，其中 **220 組站序不同**（3D/I 平日去「慈雲山(中)」17 站、繁忙時段去「慈雲山(南)」13 站）→ 索引必須含 svc，並有 fallback 鏈（原值 → 1 → 同方向任一變體） |
+| **循環線自動合併** | 實測 **114 條**路線（3S、5D、7M 等）頭尾會經過同一 stopId → 多個 seq 對應同一站自動合併，提示「第 N 站」 |
+| **零網絡方向切換** | O/I 兩方向站序都已在離線資料內，切換分頁不發請求 |
+
+### 個人化功能
+
+| 功能 | 記錄方式 | 儲存 |
+|---|---|---|
+| **常到車站** | ETA 頁手動加星 | `buseta.favorites` |
+| **常搭路線（釘選）** | 路線頁手動加星，上限 10 條 | `buseta.favRoutes` |
+| **常搭路線（自動統計）** | 同一路線**首次查看不計**（視為試用），第二次起累加；顯示達門檻者 top 5 | `buseta.routeVisits` |
+
+路線頁星號與 ETA 頁星號是**不同層級**：前者記「常搭這條路線」，後者記「常到這個站」。搜尋頁同時顯示「常搭路線」「最近搜尋」「常到車站」三個區塊。
 
 ### 官方 API 陷阱處理
 
