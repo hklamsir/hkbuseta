@@ -123,6 +123,72 @@ ok(metas.every((m) => !m.includes('成都')), '無外國同名地點混入', met
 ok(metas[0]?.includes('最近九巴站'), '顯示最近九巴站距離（判斷命中點是否門口）', metas[0]);
 await page.screenshot({ path: join(SHOTS, '02-search.png') });
 
+/* ---------- 3a. 搜尋命中點排序（淘大花園實測回歸） ---------- */
+console.log('\n[3a] 搜尋命中點排序');
+// 實測：Nominatim 對「淘大花園」返回 2 筆，display_name 完全相同
+//   - bus_stop    → 距 KT376 30m，200m 內 5 組（含德福花園）
+//   - residential → 距 KT376 76m，200m 剛好切邊只有 4 組（漏咗德福花園）
+// 用戶無從分辨，故必須靠 type + 距離自動排序。
+await page.evaluate(() => window.BusETA.clearGeoCache());
+// 注意：不可用 page.fill() —— 它不觸發 input handler，舊結果會留在畫面
+await page.click('#q');
+await page.evaluate(() => { document.getElementById('q').value = ''; });
+await page.type('#q', '淘大花園', { delay: 30 });
+await page.waitForSelector('#search-results .result', { timeout: 20000 });
+await page.waitForFunction(() => document.getElementById('search-results')?.textContent.includes('淘大花園'), { timeout: 20000 });
+const taoda = await page.evaluate(() =>
+	[...document.querySelectorAll('#search-results .result')].map((e) => ({
+		name: e.querySelector('.name')?.textContent.trim() || '',
+		tag: e.querySelector('.name .tag')?.textContent.trim() || '',
+		meta: e.querySelector('.meta')?.textContent.trim() || '',
+		dist: parseInt((e.querySelector('.meta')?.textContent.match(/最近九巴站 (\d+) 米/) || [])[1] || '9999', 10)
+	})));
+ok(taoda.length >= 2, '「淘大花園」返回多個命中點', `${taoda.length} 筆`);
+// 名稱含 badge 文字，故用 startsWith 判斷
+ok(taoda[0].name.startsWith('淘大花園') && taoda[0].tag === '準確位置',
+	'最前項為 bus_stop 命中點並標示「準確位置」', `${taoda[0].name}（${taoda[0].dist} 米）`);
+ok(taoda[0].dist <= 50, '最前項距離最近', `${taoda[0].dist} 米`);
+ok(taoda[1].dist > taoda[0].dist && taoda[1].tag === '區塊中心',
+	'住宅區塊中心排在後面並標示「區塊中心」', `${taoda[1].dist} 米`);
+
+// 揀最前項 → 應顯示完整站數（含德福花園）
+await page.click('#search-results .result');
+await page.waitForFunction(() => document.getElementById('page-nearby')?.classList.contains('active'), { timeout: 10000 });
+await page.waitForTimeout(600);
+const taodaStops = await page.$$eval('#nb-list .stop .name .txt', (els) => els.map((e) => e.textContent.trim()));
+ok(taodaStops.length >= 6, '揀「準確位置」後站數完整', `${taodaStops.length} 組`);
+ok(taodaStops.some((s) => s.includes('德福花園')), '包含原本漏掉的德福花園（切邊問題已解）');
+await page.screenshot({ path: join(SHOTS, '13-search-rank.png') });
+await page.click('#nb-back');
+await page.waitForTimeout(300);
+
+/* ---------- 3a-2. 完全同名優先於 bus_stop ---------- */
+console.log('\n[3a-2] 完全同名優先於鄰近巴士站');
+// 實測：「黃大仙中心」會同時返回「黃大仙中心」(商場) 與鄰近「沙田坳道」(bus_stop, 12m)。
+// 用戶在搜尋該商場 → 同名者必須優先，否則會被鄰站蓋掉（曾令 14 個站變 13 個）。
+await page.evaluate(() => window.BusETA.clearGeoCache());
+await page.click('#q');
+await page.evaluate(() => { document.getElementById('q').value = ''; });
+await page.type('#q', '黃大仙中心', { delay: 25 });
+await page.waitForSelector('#search-results .result', { timeout: 20000 });
+await page.waitForFunction(() => document.getElementById('search-results')?.textContent.includes('黃大仙中心'), { timeout: 20000 });
+const hsr = await page.evaluate(() =>
+	[...document.querySelectorAll('#search-results .result')].map((e) => ({
+		name: e.querySelector('.name')?.textContent.trim() || '',
+		tag: e.querySelector('.name .tag')?.textContent.trim() || ''
+	})));
+ok(hsr[0].name.startsWith('黃大仙中心'), '最前項為完全同名的商場（而非鄰近的沙田坳道巴士站）',
+	hsr.slice(0, 2).map((x) => x.name).join(' / '));
+ok(!hsr[0].name.includes('準確位置'), '完全同名項不加「準確位置」badge（避免誤導）', hsr[0].tag || '(無 badge)');
+
+await page.click('#search-results .result');
+await page.waitForFunction(() => document.getElementById('page-nearby')?.classList.contains('active'), { timeout: 10000 });
+await page.waitForTimeout(500);
+const hsrCount = await page.textContent('#nb-count');
+ok(/14 個站/.test(hsrCount), '回歸規劃書實測值（14 個站，未因排序改變而減少）', hsrCount.trim());
+await page.click('#nb-back');
+await page.waitForTimeout(300);
+
 /* ---------- 3b. 搜尋節流 + 緩存 + 錯誤分類 ---------- */
 console.log('\n[3b] 搜尋節流、緩存、錯誤分類');
 // 官方政策：硬性上限 1 req/s（operations.osmfoundation.org/policies/nominatim/）

@@ -264,16 +264,26 @@
 
 			return raw
 				.filter((r) => inHK(parseFloat(r.lat), parseFloat(r.lon)))
-				.map((r) => ({
-					name: r.display_name.split(',')[0].trim(),
-					fullName: r.display_name,
-					lat: parseFloat(r.lat),
-					lng: parseFloat(r.lon),
-					type: r.type || r.class || '',
-					// 命中點可能係隔籬建築物（規劃書 §3.4 坑三）
-					// → 交由 UI 計算到最近九巴站的距離，讓用戶判斷
-					isPoi: !/^(bus_stop|bus_station|road|footway)$/.test(r.type || r.class || '')
-				}));
+				.map((r) => {
+					const type = r.type || r.class || '';
+					return {
+						name: r.display_name.split(',')[0].trim(),
+						fullName: r.display_name,
+						lat: parseFloat(r.lat),
+						lng: parseFloat(r.lon),
+						type,
+						// 命中點可能係隔籬建築物（規劃書 §3.4 坑三）
+						// → 交由 UI 計算到最近九巴站的距離，讓用戶判斷
+						isPoi: !/^(bus_stop|bus_station|road|footway)$/.test(type),
+						/**
+						 * 命中點本身就係巴士站 → 座標最準確。
+						 * 實測「淘大花園」同時返回 residential（屋苑 polygon 中心，
+						 * 距 KT376 76m）與 bus_stop（30m），兩者 display_name 相同，
+						 * 只有靠此標記才能排序優先。
+						 */
+						isBusStop: /^(bus_stop|bus_station|platform)$/.test(type)
+					};
+				});
 		}
 	};
 
@@ -303,11 +313,13 @@
 	}
 	function geoSaveLS() {
 		try {
-			// 只留最近 60 條，值只存必要欄位以省空間
+			// 只留最近 60 條，值只存必要欄位以省空間。
+			// nearest 不存 —— 每次 renderResults 都會用當前離線資料重算，
+			// 存落去只會令資料過時（離線資料每日更新，距離可能已變）。
 			const arr = [...geoMem.entries()]
 				.sort((a, b) => b[1].at - a[1].at)
 				.slice(0, GEO_CACHE_MAX)
-				.map(([k, v]) => [k, v.at, v.list.map((c) => [c.name, c.lat, c.lng, c.type, c.isPoi, c.nearest])]);
+				.map(([k, v]) => [k, v.at, v.list.map((c) => [c.name, c.lat, c.lng, c.type, c.isPoi, c.isBusStop])]);
 			localStorage.setItem(LS_GEO_CACHE, JSON.stringify(arr));
 		} catch { /* 配額滿／私隱模式 */ }
 	}
@@ -317,8 +329,8 @@
 		for (const [k, at, rows] of geoLoadLS()) {
 			geoMem.set(k, {
 				at,
-				list: rows.map(([name, lat, lng, type, isPoi, nearest]) =>
-					({ name, lat, lng, type, isPoi, nearest }))
+				list: rows.map(([name, lat, lng, type, isPoi, isBusStop]) =>
+					({ name, lat, lng, type, isPoi, isBusStop }))
 			});
 		}
 	})();

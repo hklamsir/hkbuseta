@@ -167,24 +167,57 @@
 			return;
 		}
 
-		// 排序：POI 優先於 bus_stop（規劃書 §3.4 坑三）
-		const sorted = [...list].sort((a, b) => (b.isPoi ? 1 : 0) - (a.isPoi ? 1 : 0));
-		// 為每個候選點計算最近九巴站距離，讓用戶判斷命中點是否「門口」
+		// 排序：命中點越接近實際巴士站越好用（實測見下）
+		//
+		// 實測兩個案例：
+		// 1.「淘大花園」→ bus_stop（30m，5 組）vs residential（76m，4 組漏咗德福花園）
+		//    兩者 display_name 完全相同 → 靠 type + 距離排序
+		// 2.「黃大仙中心」→ 鄰近的「沙田坳道」bus_stop（12m）壓過「黃大仙中心」商場（12m）
+		//    用戶明確在搜尋該商場 → 故名稱完全匹配者必須優先於 bus_stop
+		//
+		// 排序準則（依此順序）：
+		//   1. 名稱與查詢字串完全相同 → 最準（用戶要的 就是這個地點）
+		//   2. 名稱包含查詢字串      → 次之
+		//   3. bus_stop 命中點       → 座標準確
+		//   4. 其他 POI / 有附近站   → 兜底
+		const qKey = String(text || '').trim();
+		const rank = (c) => {
+			const n = String(c.name || '').trim();
+			if (qKey && n === qKey) return 0;                    // 完全同名
+			if (qKey && n.includes(qKey)) return 1;               // 名稱包含查詢字串
+			if (c.isBusStop) return 2;                            // 巴士站本身座標準
+			if (c.isPoi) return 3;                                 // 商場／大廈等 POI
+			if (c.nearest != null) return 4;                       // 其他有巴士站 nearby
+			return 5;
+		};
+
+		// 先算最近九巴站距離（rank 依賴 nearest，故必須先計算）
 		if (DB) {
-			for (const c of sorted) {
+			for (const c of list) {
 				const near = B.findNearbyStops(DB, c, 500).slice(0, 1)[0];
 				c.nearest = near ? near.distance : null;
 			}
 		}
+		const sorted = [...list].sort((a, b) =>
+			rank(a) - rank(b) || (a.nearest ?? 1e9) - (b.nearest ?? 1e9));
 
 		const items = sorted.map((c, i) => {
 			const meta = [
 				c.type ? typeLabel(c.type) : '',
 				c.nearest != null ? `最近九巴站 ${c.nearest} 米` : '附近未見九巴站'
 			].filter(Boolean).join(' · ');
+			// 同名命中點無法靠名稱分辨 → 用標籤明確指出性質
+			// 完全同名時仍要看類型：「淘大花園」有 residential 與 bus_stop 兩筆同名
+			const n = String(c.name || '').trim();
+			const sameName = qKey && n === qKey;
+			const tag = c.isBusStop
+				? '<span class="tag">準確位置</span>'
+				: sameName
+					? '<span class="tag gray">區塊中心</span>'
+					: (c.nearest != null && c.nearest > 250 ? '<span class="tag gray">位置可能有偏差</span>' : '');
 			return `<button class="result" data-i="${i}">
 				<span class="body">
-					<span class="name">${esc(c.name)}</span>
+					<span class="name">${esc(c.name)}${tag}</span>
 					<span class="meta">${esc(meta)}</span>
 				</span>
 				<svg class="chev"><use href="#i-chev"/></svg>
