@@ -123,6 +123,89 @@ ok(metas.every((m) => !m.includes('成都')), '無外國同名地點混入', met
 ok(metas[0]?.includes('最近九巴站'), '顯示最近九巴站距離（判斷命中點是否門口）', metas[0]);
 await page.screenshot({ path: join(SHOTS, '02-search.png') });
 
+/* ---------- 3b. 搜尋節流 + 緩存 + 錯誤分類 ---------- */
+console.log('\n[3b] 搜尋節流、緩存、錯誤分類');
+// 官方政策：硬性上限 1 req/s（operations.osmfoundation.org/policies/nominatim/）
+const geo = await page.evaluate(async () => {
+	const B = window.BusETA;
+	B.clearGeoCache();
+	const times = [];
+	const orig = window.fetch;
+	window.fetch = (u, o) => { times.push(Date.now()); return orig(u, o); };
+	// 連續 3 個不同查詢 → 應被節流到 ≥1100ms 間隔
+	for (const t of ['太古城中心', '觀塘apm', '沙田新城市']) {
+		try { await B.searchPlaceRatelimited(t, null, 'kmb'); } catch { /* 網絡問題不影響節流驗證 */ }
+	}
+	const gaps = times.slice(1).map((t, i) => t - times[i]);
+	// 第一次查詢後再查同一字串 → 應命中緩存零請求
+	const beforeCache = times.length;
+	let cachedHit = null;
+	try { cachedHit = await B.searchPlaceRatelimited('太古城中心', null, 'kmb'); } catch { /* ignore */ }
+	const cacheGained = times.length - beforeCache;
+	const stored = JSON.parse(localStorage.getItem('buseta.geoCache') || '[]');
+	window.fetch = orig;
+	return { reqs: times.length, gaps, allGapOk: gaps.every((g) => g >= 1090), cacheGained, cached: !!cachedHit?.cached, storedLen: stored.length };
+});
+ok(geo.reqs <= 3, '連續查詢的實際請求數', `${geo.reqs} 次`);
+ok(geo.gaps.length === 0 || geo.allGapOk, '請求間隔全部 ≥1100ms（官方上限 1 req/s）',
+	geo.gaps.length ? geo.gaps.join(' / ') + ' ms' : '只有 1 次請求');
+ok(geo.cacheGained === 0, '重複查詢命中緩存 → 零網絡請求', `多用 ${geo.cacheGained} 次`);
+ok(geo.cached, '快取命中時有明確標記');
+
+// 錯誤分類（模擬各種失敗）
+const geoErrs = [];
+for (const [label, status, extraHeaders] of [
+	['403', 403, {}], ['429', 429, { 'Retry-After': '12' }],
+	['500', 500, {}], ['network', 0, {}]
+]) {
+	await page.evaluate(([st, hd]) => {
+		window.__of = window.__of || window.fetch;
+		window.fetch = (u, o) => {
+			if (String(u).includes('nominatim')) {
+				if (st === 0) return Promise.reject(new TypeError('Failed to fetch'));
+				return Promise.resolve(new Response('{}', { status: st, headers: hd }));
+			}
+			return window.__of(u, o);
+		};
+	}, [status, extraHeaders]);
+	await page.evaluate(() => {
+		const el = document.getElementById('q');
+		el.value = '測試' + Math.random().toString(36).slice(2);
+		el.dispatchEvent(new Event('input', { bubbles: true }));
+	});
+	await page.waitForTimeout(2200);
+	geoErrs.push(await page.evaluate((lbl) => {
+		const box = document.querySelector('#search-results .error-box');
+		return {
+			label: lbl,
+			title: box?.querySelector('.t')?.textContent || '',
+			desc: box?.querySelector('.d')?.textContent || '',
+			retry: document.getElementById('search-retry')?.textContent || '',
+			reloads: /location\.reload/.test(document.getElementById('search-results').innerHTML)
+		};
+	}, label));
+	await page.evaluate(() => { window.fetch = window.__of; });
+}
+const byLabel = Object.fromEntries(geoErrs.map((g) => [g.label, g]));
+ok(byLabel['403'].title.includes('不接受'), '403 → 顯示「服務暫不接受查詢」而非泛泛的繁忙', byLabel['403'].title);
+ok(byLabel['403'].desc.includes('政策'), '403 說明成因是服務端政策限制', byLabel['403'].desc.slice(0, 30));
+ok(byLabel['429'].title.includes('太頻密'), '429 → 顯示「請求太頻密」', byLabel['429'].title);
+ok(byLabel['429'].desc.includes('12'), '429 讀取 Retry-After 告知等待秒數', byLabel['429'].desc.slice(0, 40));
+ok(byLabel['500'].title.includes('繁忙'), '5xx → 顯示「暫時繁忙」', byLabel['500'].title);
+ok(byLabel['network'].title.includes('無法連接'), '網絡中斷 → 顯示「無法連接搜尋服務」', byLabel['network'].title);
+ok(geoErrs.every((g) => g.retry === '重新搜尋'), '錯誤框按鈕為「重新搜尋」');
+ok(geoErrs.every((g) => !g.reloads), '已移除無效的 location.reload（403 下 reload 冇用）');
+
+// 恢復正常搜尋（下一步 [4] 需要一份搜尋結果）
+await page.evaluate(() => {
+	window.BusETA.clearGeoCache();
+	const el = document.getElementById('q');
+	el.value = '黃大仙中心';
+	el.dispatchEvent(new Event('input', { bubbles: true }));
+});
+await page.waitForSelector('#search-results .result', { timeout: 20000 });
+await page.waitForTimeout(300);
+
 /* ---------- 4. 附近站列表 ---------- */
 console.log('\n[4] 附近站列表');
 await page.click('.result');
@@ -322,14 +405,14 @@ const rtStar = await page.evaluate(() => {
 ok(rtStar.on && rtStar.off, '常搭路線星號可加/移除');
 ok(rtStar.saved === 1, '常搭路線已寫入 localStorage', rtStar.key);
 
-// 返回按鈕 → 回 ETA 頁
+// 返回按鈕 → 回 ETA 頁（本次由 ETA 頁點路線行進入，屬正常流程）
 await page.click('#rt-back');
 await page.waitForTimeout(300);
 const backOk = await page.evaluate(() => ({
 	eta: document.getElementById('page-eta').classList.contains('active'),
 	route: document.getElementById('page-route').classList.contains('active')
 }));
-ok(backOk.eta && !backOk.route, '返回按鈕回到 ETA 頁');
+ok(backOk.eta && !backOk.route, '返回按鈕回到 ETA 頁（正常流程）');
 
 // 常搭路線區塊出現在搜尋頁
 // 先釘選兩條，再經 ETA → nearby → 搜尋頁（nb-back 會觸發 renderRecent 重繪）
@@ -360,7 +443,163 @@ const fromFav = await page.evaluate(() => ({
 ok(fromFav.rows > 0, '從常搭路線可進入站序頁', `${fromFav.rows} 行`);
 ok(fromFav.sel === 0, '從常搭清單進入不預選站（無出發站資訊）');
 await page.screenshot({ path: join(SHOTS, '09-route-from-fav.png') });
-await page.evaluate(() => { window.BusETA.store.favRoutes.clear(); window.BusETA.store.routeVisits.clear(); });
+
+/* ---------- 8b-2. 分頁 / 個別刪除 / 返回首頁 ---------- */
+console.log('\n[8b-2] 分頁、個別刪除、返回首頁');
+
+// 【第 3 項】從常搭路線進入路線頁，返回應直接回首頁
+await page.click('#rt-back');
+await page.waitForTimeout(400);
+const backFromFav = await page.evaluate(() => ({
+	search: document.getElementById('page-search').classList.contains('active'),
+	eta: document.getElementById('page-eta').classList.contains('active'),
+	route: document.getElementById('page-route').classList.contains('active')
+}));
+ok(backFromFav.search && !backFromFav.eta && !backFromFav.route,
+	'從常搭路線返回 → 直接回首頁（不經 ETA 頁）');
+
+// 【第 3 項】從常到車站進入 ETA 頁，返回應直接回首頁
+await page.evaluate(() => {
+	window.BusETA.store.favorites.toggle({ stop: '99440967B8390837', name: '黃大仙轉車站-黃大仙廟 (WT718)', lat: 22.341481, lng: 114.194301 });
+	// renderRecent 只喺頁面切換 / 星號按鈕時觸發；此處模擬 input 事件觸發重繪
+	const q = document.getElementById('q');
+	q.value = '';
+	q.dispatchEvent(new Event('input', { bubbles: true }));
+});
+await page.waitForTimeout(500);
+await page.click('#fav-tabs button[data-tab="stop"]');
+await page.waitForTimeout(300);
+const favStopTab = await page.evaluate(() => ({
+	rows: document.querySelectorAll('#recent [data-f]').length,
+	starred: !!document.querySelector('#recent [data-f] svg[fill="#f5a623"]'),
+	del: !!document.querySelector('#recent [data-unfav]')
+}));
+ok(favStopTab.rows >= 1, '「常到車站」分頁有項目', `${favStopTab.rows} 個`);
+ok(favStopTab.del, '常到車站有個別移除鈕');
+
+await page.click('#recent [data-f]');
+await page.waitForFunction(() => document.getElementById('page-eta')?.classList.contains('active'), { timeout: 15000 });
+await page.click('#eta-back');
+await page.waitForTimeout(400);
+const backFromFavStop = await page.evaluate(() => ({
+	search: document.getElementById('page-search').classList.contains('active'),
+	nearby: document.getElementById('page-nearby').classList.contains('active')
+}));
+ok(backFromFavStop.search && !backFromFavStop.nearby,
+	'從常到車站返回 → 直接回首頁（不經附近站）');
+
+// 【第 1 項】兩個分頁
+const tabs = await page.evaluate(() => {
+	const bs = [...document.querySelectorAll('#fav-tabs button')];
+	return {
+		n: bs.length,
+		labels: bs.map((b) => b.textContent.replace(/\s+/g, ' ').trim()),
+		activeIsRoute: document.querySelector('#fav-tabs button.on')?.dataset.tab,
+		// 同一時間只出現一種清單
+		frShown: document.querySelectorAll('#recent [data-fr]').length,
+		fShown: document.querySelectorAll('#recent [data-f]').length
+	};
+});
+ok(tabs.n === 2, '常搭路線／常到車站合併為 2 個分頁', `${tabs.n} 個`);
+ok(tabs.labels[0].includes('常搭路線') && tabs.labels[1].includes('常到車站'),
+	'分頁標籤正確', tabs.labels.join(' | '));
+ok(!(tabs.frShown > 0 && tabs.fShown > 0), '同一時間只顯示一個清單（非擠迫）',
+	`路線 ${tabs.frShown} 項 / 車站 ${tabs.fShown} 項`);
+
+// 分頁切換
+await page.click('#fav-tabs button[data-tab="route"]');
+await page.waitForTimeout(300);
+const afterSwitch = await page.evaluate(() => ({
+	active: document.querySelector('#fav-tabs button.on')?.dataset.tab,
+	fr: document.querySelectorAll('#recent [data-fr]').length,
+	f: document.querySelectorAll('#recent [data-f]').length
+}));
+ok(afterSwitch.active === 'route' && afterSwitch.fr > 0 && afterSwitch.f === 0,
+	'切換到「常搭路線」分頁', `路線 ${afterSwitch.fr} 項`);
+await page.click('#fav-tabs button[data-tab="stop"]');
+await page.waitForTimeout(300);
+const afterSwitch2 = await page.evaluate(() => ({
+	active: document.querySelector('#fav-tabs button.on')?.dataset.tab,
+	fr: document.querySelectorAll('#recent [data-fr]').length,
+	f: document.querySelectorAll('#recent [data-f]').length
+}));
+ok(afterSwitch2.active === 'stop' && afterSwitch2.f > 0 && afterSwitch2.fr === 0,
+	'切換到「常到車站」分頁', `車站 ${afterSwitch2.f} 項`);
+
+// 清空後分頁自動禁用（要連 routeVisits 一起清，否則自動統計清單仍有項目）
+await page.evaluate(() => {
+	window.BusETA.store.favRoutes.clear();
+	window.BusETA.store.routeVisits.clear();
+	const q = document.getElementById('q');
+	q.value = ''; q.dispatchEvent(new Event('input', { bubbles: true }));
+});
+await page.waitForTimeout(500);
+await page.click('#fav-tabs button[data-tab="stop"]');
+await page.waitForTimeout(400);
+const disabledTab = await page.evaluate(() => {
+	const bs = [...document.querySelectorAll('#fav-tabs button')];
+	return {
+		routeDisabled: bs[0].disabled,
+		stopDisabled: bs[1].disabled,
+		active: document.querySelector('#fav-tabs button.on')?.dataset.tab,
+		frShown: document.querySelectorAll('#recent [data-fr]').length
+	};
+});
+ok(disabledTab.routeDisabled, '清空後「常搭路線」分頁自動禁用');
+ok(disabledTab.active === 'stop' && disabledTab.frShown === 0,
+	'當前分頁無內容時自動跳到有內容的分頁', disabledTab.active);
+
+// 【第 2 項】最近搜尋可個別刪除（全程留在搜尋頁）
+await page.evaluate(() => {
+	const B = window.BusETA;
+	B.store.recent.clear();
+	B.store.recent.add({ name: '測試地點甲', lat: 22.3, lng: 114.2 });
+	B.store.recent.add({ name: '測試地點乙', lat: 22.31, lng: 114.21 });
+	B.store.recent.add({ name: '測試地點丙', lat: 22.32, lng: 114.22 });
+	const q = document.getElementById('q');
+	q.value = ''; q.dispatchEvent(new Event('input', { bubbles: true }));
+});
+await page.waitForTimeout(700);
+const delSetup = await page.evaluate(() => ({
+	onSearch: document.getElementById('page-search').classList.contains('active'),
+	names: [...document.querySelectorAll('#recent [data-r] .name')].map((e) => e.textContent),
+	hasDel: !!document.querySelector('#recent [data-del]')
+}));
+ok(delSetup.onSearch, '測試前停留在搜尋頁');
+ok(delSetup.hasDel, '最近搜尋有個別刪除鈕');
+ok(delSetup.names.length === 3, '最近搜尋有 3 個項目', delSetup.names.join(' / '));
+
+// 用真實點擊刪除「測試地點丙」（第一項），驗證不會觸發進入附近站頁
+await page.click('#recent [data-del]');
+await page.waitForTimeout(500);
+const delAfter = await page.evaluate(() => ({
+	stored: window.BusETA.store.recent.load().map((x) => x.name),
+	shown: [...document.querySelectorAll('#recent [data-r] .name')].map((e) => e.textContent),
+	search: document.getElementById('page-search').classList.contains('active'),
+	nearby: document.getElementById('page-nearby').classList.contains('active')
+}));
+ok(!delAfter.stored.includes('測試地點丙'), '刪除已寫入 localStorage', delAfter.stored.join(' / '));
+ok(delAfter.stored.includes('測試地點甲') && delAfter.stored.includes('測試地點乙'),
+	'其餘項目未被誤刪', delAfter.stored.join(' / '));
+ok(delAfter.search && !delAfter.nearby, '刪除鈕不會觸發進入附近站頁面');
+ok(!delAfter.shown.includes('測試地點丙'), '畫面已即時移除該項', delAfter.shown.join(' / '));
+
+// 再刪一項（列表重繪後的第一項，即「測試地點乙」）
+await page.click('#recent [data-del]');
+await page.waitForTimeout(400);
+const delTwo = await page.evaluate(() => window.BusETA.store.recent.load().map((x) => x.name));
+ok(delTwo.length === 1 && delTwo[0] === '測試地點甲', '可連續逐項刪除', delTwo.join(' / '));
+
+// 清理
+await page.evaluate(() => {
+	const B = window.BusETA;
+	B.store.favRoutes.clear();
+	B.store.routeVisits.clear();
+	B.store.favorites.clear();
+	B.store.recent.clear();
+	document.getElementById('q').dispatchEvent(new Event('input', { bubbles: true }));
+});
+await page.waitForTimeout(700);
 
 /* ---------- 8c. 路線頁資料層單元驗證 ---------- */
 console.log('\n[8c] 路線頁資料層');

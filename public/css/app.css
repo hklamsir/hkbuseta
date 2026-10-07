@@ -632,6 +632,49 @@ body {
 	#map { max-width: none; }
 }
 
+/* 常搭路線 / 常到車站 分頁 */
+.fav-tabs {
+	display: flex;
+	background: var(--bg);
+	border-radius: 8px;
+	padding: 2px;
+	margin-bottom: 8px;
+}
+.fav-tabs button {
+	flex: 1 1 0;
+	border: 0;
+	background: none;
+	border-radius: 6px;
+	padding: 7px 8px;
+	font-family: inherit;
+	font-size: 13px;
+	font-weight: 500;
+	color: var(--text-2);
+	cursor: pointer;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 5px;
+}
+.fav-tabs button.on { background: var(--brand); color: #fff; font-weight: 600; }
+.fav-tabs button:disabled { opacity: .4; cursor: default; }
+.fav-tabs button:not(.on):not(:disabled):active { background: rgba(0, 0, 0, .05); }
+.fav-tabs .n { font-size: 11px; font-weight: 600; opacity: .75; font-variant-numeric: tabular-nums; }
+
+/* 列表行內的刪除 / 移除鈕 */
+.result .row-del {
+	flex-shrink: 0;
+	width: 26px;
+	height: 26px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: 6px;
+	cursor: pointer;
+}
+.result .row-del svg { width: 13px; height: 13px; fill: none; stroke: var(--text-3); stroke-width: 2; stroke-linecap: round; }
+.result .row-del:active { background: rgba(0, 0, 0, .07); }
+
 /* ============ 路線詳情頁 ============ */
 
 /* stop-hero 內的星號靠右（沿用現有 .star class，僅定位） */

@@ -224,12 +224,23 @@
 		},
 
 		/**
-		 * 地標搜尋 — Nimbatim（九巴 API 無此能力，規劃書 §3）
+		 * 地標搜尋 — Nominatim（九巴 API 無此能力，規劃書 §3）
 		 * 實作要點（規劃書 §3.4）：
 		 *   1. 自動附加「 香港」，避免搜到外國同名地點
 		 *   2. 不用 countrycodes=hk（實測會令結果變 0 筆）
 		 *   3. 座標範圍過濾作第二重保證
 		 *   4. 多候選點返回，POI 類型優先於 bus_stop
+		 *
+		 * ⚠️ 官方使用政策（operations.osmfoundation.org/policies/nominatim/）：
+		 *   - 硬性上限 1 request/second（超出會被限流）
+		 *   - 禁止 client-side auto-complete
+		 *   - 「Clients sending repeatedly the same query may be classified as
+		 *     faulty and blocked」→ 必須自行緩存
+		 * 實測教訓：UA 過於通用（如 `Mozilla/5.0`）會直接 403。
+		 * 故必須帶明確 Referer 標識 app（瀏覽器會自動帶）。
+		 *
+		 * 節流與緩存由模組層 geocode 封裝處理（見 searchPlaceRatelimited），
+		 * 此處保持純請求職責。
 		 */
 		async searchPlace(query, signal) {
 			const url =
@@ -241,7 +252,14 @@
 					'accept-language': 'zh-HK'
 				});
 			const res = await fetch(url, { signal });
-			if (!res.ok) throw new Error(`地標搜尋失敗：HTTP ${res.status}`);
+			if (!res.ok) {
+				const err = new Error(`地標搜尋失敗：HTTP ${res.status}`);
+				err.status = res.status;
+				// 429 常帶 Retry-After；403 代表被政策封鎖（UA / Referer / 過量）
+				const ra = res.headers.get('Retry-After');
+				err.retryAfter = ra ? parseInt(ra, 10) || null : null;
+				throw err;
+			}
 			const raw = await res.json();
 
 			return raw
@@ -260,6 +278,118 @@
 	};
 
 	registerAdapter(KM);
+
+	/* ============ 地標搜尋：節流 + 緩存 ============ */
+
+	/**
+	 * Nominatim 官方政策要求（operations.osmfoundation.org/policies/nominatim/）：
+	 *   - 硬性上限 1 request/second
+	 *   - 同一查詢重覆發送會被視為 faulty 並封鎖
+	 * 故必須自行緩存 + 節流。
+	 */
+	const GEO_MIN_GAP_MS = 1100;   // 略高於官方 1 req/s，留緩衝
+	const GEO_CACHE_MAX = 60;      // 記憶體快取條數
+	const GEO_CACHE_TTL = 30 * 60 * 1000;   // 30 分鐘（地標座標唔會變）
+	const LS_GEO_CACHE = 'buseta.geoCache';
+
+	const geoMem = new Map();      // query → { at, list }
+	let geoLastAt = 0;             // 上次發出請求的時間戳
+	let geoQueue = Promise.resolve();
+
+	/** 讀持久化緩存（跨 session，避免重開頁面就再查同一批地標） */
+	function geoLoadLS() {
+		try { return JSON.parse(localStorage.getItem(LS_GEO_CACHE)) || []; }
+		catch { return []; }
+	}
+	function geoSaveLS() {
+		try {
+			// 只留最近 60 條，值只存必要欄位以省空間
+			const arr = [...geoMem.entries()]
+				.sort((a, b) => b[1].at - a[1].at)
+				.slice(0, GEO_CACHE_MAX)
+				.map(([k, v]) => [k, v.at, v.list.map((c) => [c.name, c.lat, c.lng, c.type, c.isPoi, c.nearest])]);
+			localStorage.setItem(LS_GEO_CACHE, JSON.stringify(arr));
+		} catch { /* 配額滿／私隱模式 */ }
+	}
+
+	/** 模組初始化時由 localStorage 回填記憶體快取 */
+	(function initGeoCache() {
+		for (const [k, at, rows] of geoLoadLS()) {
+			geoMem.set(k, {
+				at,
+				list: rows.map(([name, lat, lng, type, isPoi, nearest]) =>
+					({ name, lat, lng, type, isPoi, nearest }))
+			});
+		}
+	})();
+
+	function geoCacheGet(q) {
+		const hit = geoMem.get(q);
+		if (!hit) return null;
+		if (Date.now() - hit.at > GEO_CACHE_TTL) { geoMem.delete(q); return null; }
+		// 命中也要更新 LRU 位置
+		geoMem.delete(q);
+		geoMem.set(q, hit);
+		return hit.list;
+	}
+
+	function geoCacheSet(q, list) {
+		geoMem.set(q, { at: Date.now(), list });
+		while (geoMem.size > GEO_CACHE_MAX) geoMem.delete(geoMem.keys().next().value);
+		geoSaveLS();
+	}
+
+	/**
+	 * 帶節流與緩存的地標搜尋（adapter.searchPlace 的包裝）。
+	 * - 命中緩存 → 零網絡請求
+	 * - 未命中 → 排隊等間隔發出，確保 ≤ 1 req/s
+	 * @returns {Promise<{list:Array, cached:boolean}>}
+	 */
+	function searchPlaceRatelimited(query, signal, adapterId) {
+		const q = String(query).trim();
+		const cached = geoCacheGet(q);
+		if (cached) return Promise.resolve({ list: cached, cached: true });
+
+		const adapter = getAdapter(adapterId || 'kmb');
+		// 序列化到節流佇列：每個任務開始前先等到離上次請求 ≥ GEO_MIN_GAP_MS
+		const task = geoQueue.then(async () => {
+			if (signal?.aborted) throw abortError();
+			const wait = geoLastAt + GEO_MIN_GAP_MS - Date.now();
+			if (wait > 0) await sleep(wait, signal);
+			if (signal?.aborted) throw abortError();
+
+			geoLastAt = Date.now();
+			const list = await adapter.searchPlace(q, signal);
+			geoCacheSet(q, list);
+			return list;
+		});
+
+		// 無論成敗都要令佇列繼續（失敗唔應該卡死後續搜尋）
+		geoQueue = task.then(() => {}, () => {});
+		return task.then((list) => ({ list, cached: false }));
+	}
+
+	function abortError() {
+		const e = new Error('已取消');
+		e.name = 'AbortError';
+		return e;
+	}
+
+	function sleep(ms, signal) {
+		return new Promise((resolve, reject) => {
+			const t = setTimeout(resolve, ms);
+			signal?.addEventListener('abort', () => {
+				clearTimeout(t);
+				reject(abortError());
+			}, { once: true });
+		});
+	}
+
+	function clearGeoCache() {
+		geoMem.clear();
+		geoLastAt = 0;
+		localStorage.removeItem(LS_GEO_CACHE);
+	}
 
 	/* ============ 範圍搜尋 ============ */
 
@@ -425,6 +555,10 @@
 				list.unshift({ ...item, at: Date.now() });
 				localStorage.setItem(LS_RECENT, JSON.stringify(list.slice(0, 10)));
 			},
+			/** 刪除單項（以 name 為鍵，與 add 的去重鍵一致） */
+			remove(name) {
+				lsSet(LS_RECENT, this.load().filter((r) => r.name !== name));
+			},
 			clear() { localStorage.removeItem(LS_RECENT); }
 		},
 		favorites: {
@@ -519,6 +653,7 @@
 		findNearbyStops, getStopRoutes, getRouteSequence,
 		findRouteIdx, resolveRouteSeq,
 		normalizeEta, formatEta, SERVICE_LABELS,
+		searchPlaceRatelimited, clearGeoCache, GEO_MIN_GAP_MS,
 		store
 	};
 })(window);

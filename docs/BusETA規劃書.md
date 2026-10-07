@@ -283,9 +283,26 @@ URL 與參數大小寫敏感（Case sensitive）      路線號 74B ≠ 74b
 | 常到車站 | localStorage（key: `buseta.favorites`）| 站名 + stop ID + 座標 |
 | 常搭路線（釘選）| localStorage（key: `buseta.favRoutes`）| 路線號 + bound + svc + 終點名 + 時間戳，上限 10 條 |
 | 常搭路線（自動統計）| localStorage（key: `buseta.routeVisits`）| `"路線號\|bound"` → 訪問次數，上限 20 個 key；**首次查看不計**（視為試用），第二次起累加 |
-| 一鍵清除 | — | 同時清空四個 key + 顯示確認對話框 |
+| 逐項刪除 | — | 最近搜尋／常搭路線／常到車站 清單內均有移除鈕，`stopPropagation` 避免誤觸發進入 |
+| 返回目標 | — | 由搜尋頁清單進入時返回首頁；由路線頁跳轉進入該站 ETA 時返回路線頁（記於 `state.etaFrom` / `state.routeFrom`）|
+| 一鍵清除 | — | 同時清空五個 key + 顯示確認對話框 |
+| 地標搜尋緩存 | localStorage（key: `buseta.geoCache`）| 最近 60 個查詢字串 + 命中地標，TTL 30 分鐘。**必須自建**：Nominatim 政策明定「同一查詢重覆發送會被視為 faulty 並封鎖」|
 
 **規劃書必須聲明**：無伺服器、無帳號、無 analytics、無追蹤腳本。所有個人資料只存在用戶裝置的 localStorage，清除即永久刪除。
+
+### 4.7 搜尋服務的速率限制（實測教訓）
+
+Nominatim 使用政策（<https://operations.osmfoundation.org/policies/nominatim/>）的硬性約束：
+
+| 政策條文 | 本 app 的對應實作 |
+|---|---|
+| 「absolute **maximum of 1 request per second**」| `searchPlaceRatelimited()` 序列化佇列，確保相鄰請求間隔 ≥ 1100 ms；debounce 由 400 ms 調至 600 ms |
+| 「Clients sending repeatedly the same query may be classified as faulty and blocked」| 自建緩存（記憶體 LRU 60 條 ＋ localStorage，TTL 30 分鐘），命中零請求 |
+| 「Provide a valid HTTP Referer or User-Agent identifying the application」| 瀏覽器自動帶 Referer。實測 **UA 過短（如 `Mozilla/5.0`）會直接 403** |
+| 禁止 client-side auto-complete | 仍為 input 驅動（UX 取捨），靠節流 + 緩存把請求量壓到官方容忍範圍；若日後請求量上升須改為 Enter 觸發 |
+
+**錯誤處理**：403 / 429 / 400 / 網絡中斷 / 5xx 必須分開提示。403 屬服務端政策封鎖，`location.reload()` 無效，只會再被拒一次 —— 故按鈕改為「重新搜尋」。429 讀取 `Retry-After` 告知用戶應等幾秒。
+
 
 ---
 

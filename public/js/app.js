@@ -37,7 +37,15 @@
 		routeToken: 0,
 		routeTimer: null,
 		routeTick: null,
-		routeLastFetch: 0
+		routeLastFetch: 0,
+
+		/**
+		 * 返回目標追蹤。
+		 * from = 'recent' → 從搜尋頁的常搭路線／常到車站進入，返回時直接回首頁
+		 * from = null    → 正常流程（ETA 頁返回附近站、路線頁返回 ETA 頁）
+		 */
+		etaFrom: null,
+		routeFrom: null
 	};
 
 	const POLL_MS = 15000;   // 規劃書 §5.4
@@ -86,13 +94,28 @@
 	const q = $('q');
 	let searchAbort = null;
 	let searchTimer = null;
+	/** 節流佇列中排隊嘅查詢（用於顯示「排隊中」而非「搜尋中」） */
+	let pendingQuery = null;
+
+	/**
+	 * debounce 600ms（原本 400ms）。
+	 * 官方硬性上限 1 req/s，故加長 debounce + 下層 searchPlaceRatelimited 硬節流。
+	 * 兩者配合：debounce 減少無謂請求，節流確保唔會超標。
+	 */
+	const SEARCH_DEBOUNCE_MS = 600;
 
 	q.addEventListener('input', () => {
 		$('search-field').classList.toggle('has-value', !!q.value);
 		clearTimeout(searchTimer);
+		// 取消上一輪搜尋（否則舊結果會蓋掉新輸入）
+		searchAbort?.abort();
 		const v = q.value.trim();
-		if (v.length < 2) { showResults(null); return; }
-		searchTimer = setTimeout(() => doSearch(v), 400);   // debounce
+		if (v.length < 2) {
+			$('search-status').innerHTML = '';
+			showResults(null);
+			return;
+		}
+		searchTimer = setTimeout(() => doSearch(v), SEARCH_DEBOUNCE_MS);
 	});
 
 	q.addEventListener('keydown', (e) => {
@@ -107,24 +130,31 @@
 		q.focus();
 	});
 
+	/** 節流等待中顯示「等待請求間隔…」而非「搜尋中」 */
+	function showSearching(waiting) {
+		$('search-status').innerHTML = `<div class="loading"><div class="spinner"></div>
+			<div style="font-size:13px">${waiting ? '等待請求間隔…' : '搜尋中…'}</div></div>`;
+	}
+
 	async function doSearch(text) {
 		searchAbort?.abort();
 		searchAbort = new AbortController();
-		$('search-status').innerHTML = '<div class="loading"><div class="spinner"></div><div style="font-size:13px">搜尋中…</div></div>';
 		$('search-results').innerHTML = '';
+		showSearching(true);
 
 		try {
-			const list = await adapter.searchPlace(text, searchAbort.signal);
+			// 經節流 + 緩存層：命中緩存零請求；未命中排隊至 ≤ 1 req/s
+			const { list, cached } = await B.searchPlaceRatelimited(text, searchAbort.signal, adapter.id);
 			$('search-status').innerHTML = '';
-			showResults(list, text);
+			showResults(list, text, cached);
 		} catch (e) {
 			if (e.name === 'AbortError') return;
 			$('search-status').innerHTML = '';
-			showSearchError('搜尋服務暫時繁忙', '地理編碼服務未能回應，請稍後再試。若持續失敗，可能已達使用量上限。');
+			showSearchError(...geoErrorCopy(e));
 		}
 	}
 
-	function showResults(list, text) {
+	function showResults(list, text, cached) {
 		const box = $('search-results');
 		$('recent').innerHTML = '';
 		if (!list) { box.innerHTML = ''; renderRecent(); return; }
@@ -157,7 +187,9 @@
 			</button>`;
 		}).join('');
 
-		box.innerHTML = `<div class="section"><div class="section-title">搜尋結果 <span class="count">${sorted.length} 個地點</span></div>
+		// 緩存命中時明確標示，讓用戶知道結果來自本機而非即時請求
+		const badge = cached ? ' <span class="count">本機緩存</span>' : '';
+		box.innerHTML = `<div class="section"><div class="section-title">搜尋結果${badge} <span class="count">${sorted.length} 個地點</span></div>
 			<div class="card">${items}</div></div>`;
 
 		box.querySelectorAll('.result').forEach((b) => {
@@ -183,12 +215,47 @@
 		$('search-results').innerHTML = `<div class="section"><div class="card"><div class="error-box">
 			<svg class="ico"><use href="#i-warn"/></svg>
 			<div class="t">${esc(title)}</div><div class="d">${esc(desc)}</div>
-			<button class="btn" onclick="location.reload()">重新載入</button>
+			<button class="btn" id="search-retry">重新搜尋</button>
 		</div></div></div>`;
 		$('recent').innerHTML = '';
+		$('search-retry')?.addEventListener('click', () => {
+			if (q.value.trim().length >= 2) doSearch(q.value.trim());
+			else q.focus();
+		});
+	}
+
+	/**
+	 * 地標搜尋錯誤分類。
+	 * 之前所有錯誤都顯示同一句「可能已達使用量上限」，但 403（政策封鎖）
+	 * 與 429（限流）與網絡中斷的成因與應對完全不同，統一訊息會令用戶
+	 * 撳「重新載入」而無效（reload 對 403 冇用，只會再被拒一次）。
+	 * @returns {[string,string]} [標題, 說明]
+	 */
+	function geoErrorCopy(e) {
+		if (!navigator.onLine) {
+			return ['網絡已連接中斷', '請檢查網絡後再試。已搜尋過的地標會在恢復後從緩存即時顯示。'];
+		}
+		switch (e.status) {
+			case 429:
+				return ['請求太頻密', (e.retryAfter ? `官方服務要求每秒最多 1 次查詢。請約 ${e.retryAfter} 秒後再試。` : '官方服務每秒只接受 1 次查詢，請稍等幾秒再試。')];
+			case 403:
+				return ['搜尋服務暫不接受查詢',
+					'OpenStreetMap 的公開地標服務按政策封鎖過量或未標示來源的請求，這是服務端限制，唔係你的裝置問題。請稍後再試，或搜尋附近地區名稱（例如「黃大仙 旺角」）。'];
+			case 400:
+				return ['搜尋字串無法處理', '請嘗試其他關鍵字，例如加入區名或去掉括號。'];
+			default:
+				if (/Failed to fetch|NetworkError|load failed/i.test(e.message || '')) {
+					return ['無法連接搜尋服務', '請檢查網絡連線後再試。'];
+				}
+				return ['搜尋服務暫時繁忙', '地理編碼服務未能回應，請稍後再試。若持續失敗，可能已達使用量上限。'];
+		}
 	}
 
 	/* 歷史 + 常搭路線 + 常到車站 */
+
+	/** 分頁狀態：'route' = 常搭路線、'stop' = 常到車站 */
+	let favTab = 'route';
+
 	function renderRecent() {
 		const r = B.store.recent.load();
 		const f = B.store.favorites.load();
@@ -207,53 +274,107 @@
 			}));
 		const favRoutes = [...pinned, ...auto];
 
-		if (favRoutes.length) {
-			html += `<div class="section"><div class="section-title">常搭路線 <span class="count">${favRoutes.length} 條</span></div><div class="card">` +
-				favRoutes.map((x, i) => `<button class="result" data-fr="${i}">
-					<svg style="width:18px;height:18px;flex-shrink:0;${x.pinned ? 'fill:#f5a623;stroke:#f5a623' : 'fill:none;stroke:var(--text-3);stroke-width:2;stroke-linejoin:round'}"><use href="#i-star"/></svg>
-					<span class="body">
-						<span class="name">${esc(x.r)} <span class="sub2">往 ${esc(x.d || '—')}</span></span>
-						${x.count ? `<span class="meta">已查看 ${x.count} 次</span>` : ''}
-					</span>
-					<svg class="chev"><use href="#i-chev"/></svg></button>`).join('') +
-				'</div></div>';
-		}
-
+		// 最近搜尋（可逐項刪除）
 		if (r.length) {
 			html += `<div class="section"><div class="section-title">最近搜尋</div><div class="card">` +
 				r.map((x, i) => `<button class="result" data-r="${i}">
 					<svg style="width:18px;height:18px;stroke:var(--text-3);fill:none;stroke-width:2;flex-shrink:0"><use href="#i-clock"/></svg>
 					<span class="body"><span class="name">${esc(x.name)}</span></span>
-					<svg class="chev"><use href="#i-chev"/></svg></button>`).join('') +
+					<span class="row-del" data-del="${esc(x.name)}" role="button" aria-label="刪除 ${esc(x.name)}" title="刪除">
+						<svg><use href="#i-x"/></svg>
+					</span>
+				</button>`).join('') +
 				'</div></div>';
 		}
-		if (f.length) {
-			html += `<div class="section"><div class="section-title">常到車站 <span class="count">${f.length} 個</span></div><div class="card">` +
-				f.map((x) => `<button class="result" data-f="${esc(x.stop)}">
+
+		// 常搭路線 / 常到車站：同一個分頁容器，避免三個區塊同時出現過於擠迫
+		if (favRoutes.length || f.length) {
+			// 若當前分頁已無內容，自動跳到另一個有內容的分頁
+			if (favTab === 'route' && !favRoutes.length) favTab = 'stop';
+			else if (favTab === 'stop' && !f.length) favTab = 'route';
+
+			const rows = favTab === 'route'
+				? favRoutes.map((x, i) => `<button class="result" data-fr="${i}">
+					<svg style="width:18px;height:18px;flex-shrink:0;${x.pinned ? 'fill:#f5a623;stroke:#f5a623' : 'fill:none;stroke:var(--text-3);stroke-width:2;stroke-linejoin:round'}"><use href="#i-star"/></svg>
+					<span class="body">
+						<span class="name">${esc(x.r)} <span class="sub2">往 ${esc(x.d || '—')}</span></span>
+						${x.count ? `<span class="meta">已查看 ${x.count} 次</span>` : ''}
+					</span>
+					${x.pinned ? `<span class="row-del" data-unpin="${i}" role="button" aria-label="取消常搭 ${esc(x.r)}" title="取消常搭">
+						<svg><use href="#i-x"/></svg></span>` : '<svg class="chev"><use href="#i-chev"/></svg>'}
+				</button>`).join('')
+				: f.map((x) => `<button class="result" data-f="${esc(x.stop)}">
 					<svg style="width:18px;height:18px;fill:#f5a623;stroke:#f5a623;flex-shrink:0"><use href="#i-star"/></svg>
 					<span class="body"><span class="name">${esc(x.name)}</span></span>
-					<svg class="chev"><use href="#i-chev"/></svg></button>`).join('') +
-				'</div></div>';
+					<span class="row-del" data-unfav="${esc(x.stop)}" role="button" aria-label="移除 ${esc(x.name)}" title="移除">
+						<svg><use href="#i-x"/></svg>
+					</span>
+				</button>`).join('');
+
+			html += `<div class="section">
+				<div class="fav-tabs" id="fav-tabs">
+					<button data-tab="route" class="${favTab === 'route' ? 'on' : ''}" ${favRoutes.length ? '' : 'disabled'}>
+						常搭路線 <span class="n">${favRoutes.length}</span>
+					</button>
+					<button data-tab="stop" class="${favTab === 'stop' ? 'on' : ''}" ${f.length ? '' : 'disabled'}>
+						常到車站 <span class="n">${f.length}</span>
+					</button>
+				</div>
+				<div class="card">${rows}</div>
+			</div>`;
+		} else {
+			favTab = 'route';
 		}
 		$('recent').innerHTML = html;
 
-		$('recent').querySelectorAll('[data-fr]').forEach((b) => b.addEventListener('click', async () => {
+		$('fav-tabs')?.addEventListener('click', (e) => {
+			const b = e.target.closest('button[data-tab]');
+			if (!b || b.disabled) return;
+			favTab = b.dataset.tab;
+			renderRecent();
+		});
+
+		$('recent').querySelectorAll('[data-fr]').forEach((b) => b.addEventListener('click', async (e) => {
+			if (e.target.closest('[data-unpin]')) return;   // 刪除鈕已另行處理
 			const x = favRoutes[+b.dataset.fr];
-			await boot();
-			if (!DB) return;
-			B.store.routeVisits.visit(x.r, x.b);
-			openRoute({
-				no: x.r, dir: x.b, svc: x.s || 1, dest: x.d || '',
-				seqs: null   // 從常搭清單進入無特定出發站 → 只顯示全線站序
+			boot().then(() => {
+				if (!DB) return;
+				B.store.routeVisits.visit(x.r, x.b);
+				openRoute({
+					no: x.r, dir: x.b, svc: x.s || 1, dest: x.d || '',
+					seqs: null,   // 從常搭清單進入無特定出發站 → 只顯示全線站序
+					from: 'recent' // 返回時直接回首頁
+				});
 			});
 		}));
-		$('recent').querySelectorAll('[data-r]').forEach((b) => b.addEventListener('click', () => {
+		$('recent').querySelectorAll('[data-unpin]').forEach((b) => b.addEventListener('click', (e) => {
+			e.stopPropagation();
+			const x = favRoutes[+b.dataset.unpin];
+			B.store.favRoutes.toggle(x.r, x.b, x.s || 1, x.d);
+			renderRecent();
+			toast('已取消常搭');
+		}));
+		$('recent').querySelectorAll('[data-r]').forEach((b) => b.addEventListener('click', (e) => {
+			if (e.target.closest('[data-del]')) return;     // 刪除鈕已另行處理
 			const x = r[+b.dataset.r];
 			openNearby({ name: x.name, lat: x.lat, lng: x.lng });
 		}));
-		$('recent').querySelectorAll('[data-f]').forEach((b) => b.addEventListener('click', () => {
+		$('recent').querySelectorAll('[data-del]').forEach((b) => b.addEventListener('click', (e) => {
+			e.stopPropagation();
+			B.store.recent.remove(b.dataset.del);
+			renderRecent();
+			toast('已刪除');
+		}));
+		$('recent').querySelectorAll('[data-f]').forEach((b) => b.addEventListener('click', (e) => {
+			if (e.target.closest('[data-unfav]')) return;
 			const x = f.find((y) => y.stop === b.dataset.f);
-			if (x) openEta({ stop: x.stop, name: x.name, lat: x.lat, lng: x.lng });
+			if (x) openEta({ stop: x.stop, name: x.name, lat: x.lat, lng: x.lng, from: 'recent' });
+		}));
+		$('recent').querySelectorAll('[data-unfav]').forEach((b) => b.addEventListener('click', (e) => {
+			e.stopPropagation();
+			B.store.favorites.toggle({ stop: b.dataset.unfav });
+			renderRecent();
+			toast('已移除');
 		}));
 	}
 
@@ -271,6 +392,7 @@
 		B.store.favorites.clear();
 		B.store.favRoutes.clear();
 		B.store.routeVisits.clear();
+		B.clearGeoCache();
 		renderRecent();
 		toast('已清除');
 	});
@@ -369,7 +491,25 @@
 
 	/* ============ M4 ETA 頁 ============ */
 
-	$('eta-back').addEventListener('click', () => { stopPolling(); go('nearby'); });
+	$('eta-back').addEventListener('click', () => {
+		stopPolling();
+		const from = state.etaFrom;
+		state.etaFrom = null;
+		// 從常到車站進入 → 返回時直接回首頁，略過附近站列表
+		if (from === 'recent') {
+			go('search');
+			renderRecent();
+			return;
+		}
+		// 從路線頁跳轉進入 → 返回路線頁（該路線的站序仍然有用）
+		if (from === 'route') {
+			state.routeSel = null;
+			state.routeEta = [];
+			go('route');
+			return;
+		}
+		go('nearby');
+	});
 	$('eta-refresh').addEventListener('click', () => { state.lastFetch = 0; fetchEta(); });
 
 	async function openEta(stop) {
@@ -377,6 +517,12 @@
 		stopRoutePolling();      // 路線頁的輪詢要先停，避免背景跑無用請求
 		stopPolling();          // 先停上一輪，避免請求堆疊
 		state.stop = stop;
+		// 記錄來源，供返回按鈕決定目標：
+		//   'recent' → 從常到車站進入，返回首頁
+		//   'route'  → 從路線頁跳轉進入，返回路線頁（nearby 未經過，不可回）
+		//   null     → 正常流程，返回附近站
+		state.etaFrom = stop.from === 'recent' ? 'recent'
+			: stop.from === 'route' ? 'route' : null;
 		$('eta-name').textContent = stop.name;
 		$('eta-coord').textContent =
 			`${stop.lat.toFixed(5)}, ${stop.lng.toFixed(5)}` + (stop.distance != null ? ` · 距離 ${stop.distance} 米` : '');
@@ -611,7 +757,19 @@
 
 	/* ============ M7 路線詳情頁 ============ */
 
-	$('rt-back').addEventListener('click', () => { stopRoutePolling(); go('eta'); });
+	$('rt-back').addEventListener('click', () => {
+		stopRoutePolling();
+		// 從常搭路線進入 → 返回時直接回首頁
+		if (state.routeFrom === 'recent') {
+			state.routeFrom = null;
+			state.routeSel = null;
+			state.routeEta = [];
+			go('search');
+			renderRecent();
+			return;
+		}
+		go('eta');
+	});
 	$('rt-refresh').addEventListener('click', () => { state.routeLastFetch = 0; fetchRouteStopEta(); });
 	$('rt-fav').addEventListener('click', () => {
 		const r = state.route;
@@ -644,6 +802,8 @@
 		// 清掉上一條路線的選中狀態，避免 remapByStopId 拿舊資料對應
 		state.routeSel = null;
 		state.routeEta = [];
+		// 記錄來源，供返回按鈕決定目標（從常搭路線進入 → 返回首頁）
+		state.routeFrom = opts.from === 'recent' ? 'recent' : null;
 		state.route = { no: opts.no, bound: opts.dir, svc: opts.svc, dest: opts.dest };
 
 		// 自動訪問統計：首次不計（視為試用），第二次起才累加
@@ -827,7 +987,8 @@ function setRouteDir(dir, svc, ctx, hint) {
 			const s = state.routeStops[i];
 			if (jump) {
 				stopRoutePolling();
-				openEta({ stop: s.stop, name: s.name, lat: s.lat, lng: s.lng });
+				// from='route' → ETA 頁返回時返路線頁
+				openEta({ stop: s.stop, name: s.name, lat: s.lat, lng: s.lng, from: 'route' });
 				return;
 			}
 			selectStop(s);
