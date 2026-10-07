@@ -537,6 +537,23 @@
 	const LS_FAV = 'buseta.favorites';
 	const LS_FAV_ROUTES = 'buseta.favRoutes';
 	const LS_ROUTE_VISITS = 'buseta.routeVisits';
+	const LS_ROUTE_HIDDEN = 'buseta.routeVisitsHidden';
+
+	/**
+	 * 解除自動統計屏蔽。
+	 * 抽成獨立 function 而非直接調 routeVisits.unhide()：
+	 * favRoutes 在物件字面量中定義於 routeVisits 之前，
+	 * 但 toggle() 只在執行時呼叫，那時兩者都已賦值 —— 用 function 宣告
+	 * 可避免依賴定義順序。
+	 */
+	function routeVisitsHiddenRemove(route, bound) {
+		try {
+			const set = new Set(JSON.parse(localStorage.getItem(LS_ROUTE_HIDDEN)) || []);
+			if (set.delete(`${route}|${bound}`)) {
+				localStorage.setItem(LS_ROUTE_HIDDEN, JSON.stringify([...set]));
+			}
+		} catch { /* 私隱模式 */ }
+	}
 
 	/** 讀一個 localStorage JSON key，容錯 */
 	function lsGet(k, fallback) {
@@ -593,6 +610,8 @@
 				else {
 					list.unshift({ r, b, s, d: dest || '', at: Date.now() });
 					if (list.length > this.MAX) list.length = this.MAX;
+					// 主動加星 = 想見到呢條路線 → 解除自動統計的屏蔽
+					routeVisitsHiddenRemove(r, b);
 				}
 				lsSet(LS_FAV_ROUTES, list);
 				return i < 0;
@@ -606,14 +625,35 @@
 		 * 門檻：同一路線首次進入不計（視為試用），第二次起才累加 ——
 		 * 避免用戶「試下新路線」就污染清單。
 		 * 上限 20 個 key，超出丟次數最少的。
+		 *
+		 * hidden（用戶手動移除自動統計項）：
+		 * 只刪計數的話，用戶下次再查同一路線兩次就會重新出現，
+		 * 會令人覺得「刪咗但又彈返出嚟」。故另設屏蔽清單。
 		 */
 		routeVisits: {
 			MAX: 20,
 			THRESHOLD: 2,
+			LS_HIDDEN: LS_ROUTE_HIDDEN,
+
 			load() { return lsGet(LS_ROUTE_VISITS, {}); },
+			hidden() { return new Set(lsGet(this.LS_HIDDEN, [])); },
+			hide(route, bound) {
+				const k = `${route}|${bound}`;
+				const set = this.hidden();
+				set.add(k);
+				lsSet(this.LS_HIDDEN, [...set]);
+			},
+			/** 解除屏蔽（用戶重新加星時） */
+			unhide(route, bound) {
+				const k = `${route}|${bound}`;
+				const set = this.hidden();
+				if (set.delete(k)) lsSet(this.LS_HIDDEN, [...set]);
+			},
+
 			/** @returns {{count:number, counted:boolean}} counted=本次是否真的累加 */
 			visit(r, b) {
 				const k = `${r}|${b}`;
+				if (this.hidden().has(k)) return { count: 0, counted: false, hidden: true };
 				const map = this.load();
 				const prev = map[k] || 0;
 				// 首次（prev===0）只建立 key 不累加 → 第二次起才計
@@ -632,8 +672,9 @@
 			},
 			/** 達門檻的項目，按次數倒序；已釘選的由 caller 排除 */
 			top(n) {
+				const hide = this.hidden();
 				return Object.entries(this.load())
-					.filter(([, c]) => c >= this.THRESHOLD)
+					.filter(([k, c]) => c >= this.THRESHOLD && !hide.has(k))
 					.sort((a, b) => b[1] - a[1])
 					.slice(0, n)
 					.map(([k, c]) => {
@@ -641,7 +682,10 @@
 						return { route: r, bound: b, count: c };
 					});
 			},
-			clear() { localStorage.removeItem(LS_ROUTE_VISITS); }
+			clear() {
+				localStorage.removeItem(LS_ROUTE_VISITS);
+				localStorage.removeItem(this.LS_HIDDEN);
+			}
 		}
 	};
 

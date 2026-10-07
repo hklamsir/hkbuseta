@@ -590,6 +590,96 @@ await page.waitForTimeout(400);
 const delTwo = await page.evaluate(() => window.BusETA.store.recent.load().map((x) => x.name));
 ok(delTwo.length === 1 && delTwo[0] === '測試地點甲', '可連續逐項刪除', delTwo.join(' / '));
 
+/* ---------- 8b-3. 自動統計項可移除 + 清除文案 ---------- */
+console.log('\n[8b-3] 自動統計項移除、清除文案');
+
+// 造兩條：1 條釘選 + 1 條自動統計
+await page.evaluate(() => {
+	const B = window.BusETA;
+	B.store.favRoutes.clear();
+	B.store.routeVisits.clear();
+	B.store.favorites.clear();
+	B.store.favRoutes.toggle('1', 'O', 1, '尖沙咀碼頭');            // 釘選
+	B.store.routeVisits.visit('960P', 'I');                          // 首次不計
+	B.store.routeVisits.visit('960P', 'I');                          // 第二次起計
+	B.store.routeVisits.visit('960P', 'I');
+	const q = document.getElementById('q');
+	q.value = ''; q.dispatchEvent(new Event('input', { bubbles: true }));
+});
+await page.waitForTimeout(800);
+// 注意：data-fr 在 <button> 上，data-rmroute 在其內的 <span> 上 → 必須用空格 descendant
+const rmSetup = await page.evaluate(() => ({
+	rows: document.querySelectorAll('#recent [data-fr]').length,
+	rmAll: document.querySelectorAll('#recent [data-rmroute]').length,
+	autoRow: !!document.querySelector('#recent [data-fr="1"] [data-rmroute]'),
+	autoLabel: document.querySelector('#recent [data-fr="1"] [data-rmroute]')?.getAttribute('title'),
+	pinnedLabel: document.querySelector('#recent [data-fr="0"] [data-rmroute]')?.getAttribute('title')
+}));
+ok(rmSetup.rows === 2, '釘選 + 自動統計各一列', `${rmSetup.rows} 列`);
+ok(rmSetup.rmAll === 2, '兩種列都有移除鈕（釘選與自動統計都可刪）', `${rmSetup.rmAll} 個`);
+ok(rmSetup.autoRow, '未打星的自動統計列有移除鈕');
+ok(rmSetup.pinnedLabel === '取消常搭' && rmSetup.autoLabel === '不再記錄',
+	'兩種列的提示文案有區別', `${rmSetup.pinnedLabel} / ${rmSetup.autoLabel}`);
+
+// 移除自動統計項（用真實點擊；選擇器為 descendant 而非複合）
+await page.click('#recent [data-fr="1"] [data-rmroute]');
+await page.waitForTimeout(600);
+const afterRmAuto = await page.evaluate(() => ({
+	shown: document.querySelectorAll('#recent [data-fr]').length,
+	top: window.BusETA.store.routeVisits.top(20).map((x) => x.route),
+	hidden: JSON.parse(localStorage.getItem('buseta.routeVisitsHidden') || '[]')
+}));
+ok(afterRmAuto.shown === 1, '自動統計項已從清單移除', `${afterRmAuto.shown} 列`);
+ok(!afterRmAuto.top.includes('960P'), '且不再顯示在自動統計中', afterRmAuto.top.join(' / '));
+ok(afterRmAuto.hidden.includes('960P|I'), '已加入屏蔽清單（避免下次再記錄）', afterRmAuto.hidden.join(' / '));
+
+// 屏蔽後再進入該路線，不應重新計數
+const revisit = await page.evaluate(async () => {
+	const B = window.BusETA;
+	const before = B.store.routeVisits.load();
+	const r1 = B.store.routeVisits.visit('960P', 'I');
+	const r2 = B.store.routeVisits.visit('960P', 'I');
+	const r3 = B.store.routeVisits.visit('960P', 'I');
+	return { same: JSON.stringify(before) === JSON.stringify(B.store.routeVisits.load()), r1, r2, r3 };
+});
+ok(revisit.same, '屏蔽後再查看該路線 3 次，計數不變', `count=${revisit.r3.count}`);
+ok(revisit.r3.hidden === true, 'visit() 明確回報該項已屏蔽');
+
+// 手動加星應解除屏蔽
+const unhideTest = await page.evaluate(() => {
+	const B = window.BusETA;
+	B.store.favRoutes.toggle('960P', 'I', 1, '洪水橋');
+	const hidden = JSON.parse(localStorage.getItem('buseta.routeVisitsHidden') || '[]');
+	B.store.favRoutes.clear();
+	B.store.routeVisits.clear();
+	B.store.favRoutes.toggle('1', 'O', 1, '尖沙咀碼頭');
+	return { stillHidden: hidden.includes('960P|I') };
+});
+ok(!unhideTest.stillHidden, '主動加星會解除屏蔽（用戶想再見到這條路線）');
+
+// 清除文案
+const copyTest = await page.evaluate(() => {
+	const link = document.getElementById('clear-data');
+	return {
+		text: link.textContent.trim(),
+		sub: link.parentElement.querySelector('div')?.textContent.trim() || ''
+	};
+});
+ok(/清除本機所有資料/.test(copyTest.text), '清除連結文案已更新', copyTest.text);
+ok(/只存於此裝置/.test(copyTest.sub), '補充說明資料只存於本機', copyTest.sub.slice(0, 30));
+
+// 清除確認框列出實際筆數
+const confirmCopy = await page.evaluate(() => {
+	let msg = '';
+	const orig = window.confirm;
+	window.confirm = (m) => { msg = m; return false; };   // 取消，不真的清除
+	document.getElementById('clear-data').click();
+	window.confirm = orig;
+	return msg;
+});
+ok(/最近搜尋（\d+ 項）/.test(confirmCopy), '確認框列出最近搜尋筆數', confirmCopy.split('\n')[2]);
+ok(/地標搜尋緩存/.test(confirmCopy), '確認框包含地標緩存（原本遺漏）', confirmCopy.split('\n')[5]);
+
 // 清理
 await page.evaluate(() => {
 	const B = window.BusETA;
@@ -600,6 +690,52 @@ await page.evaluate(() => {
 	document.getElementById('q').dispatchEvent(new Event('input', { bubbles: true }));
 });
 await page.waitForTimeout(700);
+
+/* ---------- 8b-4. 開機 race condition（DB 未載入時 renderRecent） ---------- */
+console.log('\n[8b-4] 開機時序：DB 未載入不可拋錯');
+// 用戶情境：localStorage 有 routeVisits 記錄 → renderRecent() 內的 routeDestName()
+// 會讀 DB.routeList。若喺 gz 解壓完成前就呼叫，會拋
+// TypeError: Cannot read properties of null (reading 'routeList')。
+const race = await (async () => {
+	const ctx2 = await browser.newContext({ locale: 'zh-HK' });
+	await ctx2.addInitScript(() => {
+		localStorage.setItem('buseta.routeVisits', JSON.stringify({ '960P|I': 5, '26|O': 3 }));
+		localStorage.setItem('buseta.favRoutes', JSON.stringify([{ r: '27', b: 'I', s: 1, d: '旺角(循環線)', at: Date.now() }]));
+	});
+	// 人為延遲 gz 回應，製造 DB 尚未就緒的窗口
+	await ctx2.route('**/data/*.gz', async (route) => {
+		await new Promise((r) => setTimeout(r, 1200));
+		await route.continue();
+	});
+	const p2 = await ctx2.newPage();
+	const errs = [];
+	p2.on('pageerror', (e) => errs.push(e.message));
+	p2.on('console', (m) => { if (m.type() === 'error') errs.push(m.text()); });
+
+	await p2.goto(BASE, { waitUntil: 'domcontentloaded' });
+	await p2.waitForTimeout(250);
+	// 資料未到就輸入 → 觸發 showResults(null) → renderRecent()
+	await p2.type('#q', '文閣', { delay: 40 });
+	await p2.waitForTimeout(200);
+	await p2.evaluate(() => {
+		const el = document.getElementById('q');
+		el.value = '';
+		el.dispatchEvent(new Event('input', { bubbles: true }));
+	});
+	await p2.waitForFunction(() => document.getElementById('data-stamp')?.textContent?.includes('路線'), { timeout: 25000 });
+	await p2.waitForTimeout(500);
+
+	const ui = await p2.evaluate(() => ({
+		rows: [...document.querySelectorAll('#recent [data-fr] .name')].map((e) => e.textContent.trim()),
+		dests: [...document.querySelectorAll('#recent [data-fr] .sub2')].map((e) => e.textContent.trim())
+	}));
+	await ctx2.close();
+	return { errs, ui };
+})();
+ok(race.errs.length === 0, 'DB 未載入時 renderRecent 不拋錯', race.errs.slice(0, 2).join(' | '));
+ok(!race.errs.some((e) => /routeList/.test(e)), '無「Cannot read properties of null」錯誤');
+ok(race.ui.rows.length === 3, '資料載入後補上完整清單', race.ui.rows.join(' / '));
+ok(race.ui.dests.every((d) => !d.includes('—')), '終點名已補齊（無佔位符）', race.ui.dests.join(' / '));
 
 /* ---------- 8c. 路線頁資料層單元驗證 ---------- */
 console.log('\n[8c] 路線頁資料層');

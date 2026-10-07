@@ -61,7 +61,7 @@ scripts/
 ├── build-data.mjs      離線資料打包（4.24MB → 339 KB，8%）
 ├── bump-sw.mjs         Service Worker 版本戳（部署前必須跑；純內容 hash，無變不改 sw.js）
 ├── serve.mjs           零依賴開發伺服器
-├── verify.mjs          Playwright 端到端驗證（112 項）
+├── verify.mjs          Playwright 端到端驗證（130 項）
 └── verify-offline.mjs  離線模式驗證（13 項）
     verify-sw-version.mjs  SW 版本追蹤驗證
 
@@ -161,11 +161,20 @@ Nominatim 是 OSM 提供的免費公開服務，其[使用政策](https://operat
 |---|---|---|
 | **常到車站** | ETA 頁手動加星，清單內可逐項移除 | `buseta.favorites` |
 | **常搭路線（釘選）** | 路線頁手動加星，上限 10 條，清單內可逐項取消 | `buseta.favRoutes` |
-| **常搭路線（自動統計）** | 同一路線**首次查看不計**（視為試用），第二次起累加；顯示達門檻者 top 5 | `buseta.routeVisits` |
+| **常搭路線（自動統計）** | 同一路線**首次查看不計**（視為試用），第二次起累加；顯示達門檻者 top 5 | `buseta.routeVisits` ＋ `buseta.routeVisitsHidden` |
 
 分頁在當前分頁無內容時自動切換、該分頁清空後自動禁用。
 
 路線頁星號與 ETA 頁星號是**不同層級**：前者記「常搭這條路線」，後者記「常到這個站」。
+
+**兩種常搭路線都可逐項移除**，但語義不同：
+
+| 列 | 移除動作 | 行為 |
+|---|---|---|
+| ⭐ 已加星 | 取消常搭 | 從 `favRoutes` 移除，之後可再手動加回 |
+| ☆ 未加星（自動統計） | 不再記錄 | 加入 `routeVisitsHidden` 屏蔽清單。**只刪計數的話，用戶下次再查同一路線兩次就會重新出現**，會令人覺得「刪咗但又彈返出嚟」 |
+
+手動加星會自動解除屏蔽（用戶主動加星代表想再見到這條路線）。清除本機資料的連結文案為「清除本機所有資料」，並附說明四類資料只存於裝置；確認框會列出各類實際筆數。
 
 **返回目標跟隨來源**（`state.etaFrom` / `state.routeFrom`）：
 
@@ -177,7 +186,6 @@ Nominatim 是 OSM 提供的免費公開服務，其[使用政策](https://operat
 | 路線頁點 `→` → 該站 ETA | **路線頁**（該站序仍有用） | — |
 
 ### 官方 API 陷阱處理
-
 實測發現並已處理（詳見規劃書 §2.3-2.5）：
 
 | 陷阱 | 處理 |
@@ -188,6 +196,18 @@ Nominatim 是 OSM 提供的免費公開服務，其[使用政策](https://operat
 | `service_type` 有 8 種值（非官方所述 3 種） | 全部處理，UI 顯示時段標籤 |
 | 同名車站有多個 stop ID | 剝除括號編碼後合併，標示「N 個行車位」，ETA 平行查詢後合併 |
 | Nominatim `countrycodes=hk` 令結果變 0 筆 | 改用「附加香港關鍵字 + 座標範圍過濾」 |
+
+### 開機時序：DB 未載入前不可呼叫依賴 DB 的 UI
+
+離線資料要解壓 339 KB gzip，通常需 0.5–2 秒。這段時間內使用者已經可以操作 UI，所以任何讀 `DB` 的渲染函式都可能撞到 `DB === null`。
+
+**規則：`renderRecent()` 依賴 `DB`**（內部 `routeDestName()` 要查 `DB.routeList` 取終點名），因此：
+
+- `boot()` 只在**載入成功之後**呼叫 `renderRecent()`（原本在 `try` 之前呼叫 → 必拋 `TypeError: Cannot read properties of null (reading 'routeList')`）
+- `routeDestName()` 本身也要守衛 `if (!DB || !DB.routeList) return ''` —— 因為 `input` handler 觸發的 `showResults(null)` 也會呼叫 `renderRecent()`，無法保證時序
+- 資料載入失敗時也要呼叫 `renderRecent()`，否則會顯示過時的終點名
+
+`verify.mjs` 的 `[8b-4]` 用延遲 gz 回應 1.2 秒製造 race window，回歸此類問題。
 
 ### 距離搜尋
 

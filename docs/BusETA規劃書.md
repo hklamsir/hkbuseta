@@ -283,7 +283,8 @@ URL 與參數大小寫敏感（Case sensitive）      路線號 74B ≠ 74b
 | 常到車站 | localStorage（key: `buseta.favorites`）| 站名 + stop ID + 座標 |
 | 常搭路線（釘選）| localStorage（key: `buseta.favRoutes`）| 路線號 + bound + svc + 終點名 + 時間戳，上限 10 條 |
 | 常搭路線（自動統計）| localStorage（key: `buseta.routeVisits`）| `"路線號\|bound"` → 訪問次數，上限 20 個 key；**首次查看不計**（視為試用），第二次起累加 |
-| 逐項刪除 | — | 最近搜尋／常搭路線／常到車站 清單內均有移除鈕，`stopPropagation` 避免誤觸發進入 |
+| 常搭路線屏蔽清單 | localStorage（key: `buseta.routeVisitsHidden`）| 用戶手動移除自動統計項後記錄，**防止「刪咗又彈返出嚟」**。手動加星會自動解除屏蔽 |
+| 逐項刪除 | — | 最近搜尋／常搭路線（釘選與自動統計兩種）／常到車站 均有移除鈕，`stopPropagation` 避免誤觸發進入。工具提示區分「取消常搭」與「不再記錄」 |
 | 返回目標 | — | 由搜尋頁清單進入時返回首頁；由路線頁跳轉進入該站 ETA 時返回路線頁（記於 `state.etaFrom` / `state.routeFrom`）|
 | 一鍵清除 | — | 同時清空五個 key + 顯示確認對話框 |
 | 地標搜尋緩存 | localStorage（key: `buseta.geoCache`）| 最近 60 個查詢字串 + 命中地標，TTL 30 分鐘。**必須自建**：Nominatim 政策明定「同一查詢重覆發送會被視為 faulty 並封鎖」|

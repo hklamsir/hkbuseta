@@ -58,7 +58,7 @@
 	async function boot() {
 		if (booting) return booting;
 		booting = (async () => {
-			renderRecent();
+			// 網絡狀態要在載入資料前顯示（離線時即時見到提示）
 			updateNetState();
 			try {
 				const manifest = await (await fetch('data/build-manifest.json')).json();
@@ -73,8 +73,12 @@
 			} catch (e) {
 				console.error('[boot]', e);
 				showSearchError('離線資料載入失敗', `${e.message}。請檢查網絡後重新整理頁面。`);
+				// 資料載入失敗也要清掉 localStorage 區塊（否則會顯示過時的終點名）
+				renderRecent();
 				return;
 			}
+			// renderRecent() 依賴 DB（要查路線終點名），必須等資料載入後才呼叫。
+			// 原本在 try 之前呼叫 → DB 為 null 時 routeDestName() 讀 DB.routeList 會爆。
 			renderRecent();
 		})();
 		return booting;
@@ -300,8 +304,11 @@
 						<span class="name">${esc(x.r)} <span class="sub2">往 ${esc(x.d || '—')}</span></span>
 						${x.count ? `<span class="meta">已查看 ${x.count} 次</span>` : ''}
 					</span>
-					${x.pinned ? `<span class="row-del" data-unpin="${i}" role="button" aria-label="取消常搭 ${esc(x.r)}" title="取消常搭">
-						<svg><use href="#i-x"/></svg></span>` : '<svg class="chev"><use href="#i-chev"/></svg>'}
+					<span class="row-del" data-rmroute="${i}" role="button"
+						aria-label="從常搭路線移除 ${esc(x.r)}"
+						title="${x.pinned ? '取消常搭' : '不再記錄'}">
+						<svg><use href="#i-x"/></svg>
+					</span>
 				</button>`).join('')
 				: f.map((x) => `<button class="result" data-f="${esc(x.stop)}">
 					<svg style="width:18px;height:18px;fill:#f5a623;stroke:#f5a623;flex-shrink:0"><use href="#i-star"/></svg>
@@ -335,7 +342,7 @@
 		});
 
 		$('recent').querySelectorAll('[data-fr]').forEach((b) => b.addEventListener('click', async (e) => {
-			if (e.target.closest('[data-unpin]')) return;   // 刪除鈕已另行處理
+			if (e.target.closest('[data-rmroute]')) return;   // 移除鈕已另行處理
 			const x = favRoutes[+b.dataset.fr];
 			boot().then(() => {
 				if (!DB) return;
@@ -347,12 +354,18 @@
 				});
 			});
 		}));
-		$('recent').querySelectorAll('[data-unpin]').forEach((b) => b.addEventListener('click', (e) => {
+		// 釘選項 → 取消加星；自動統計項 → 加入屏蔽清單（否則下次再查又會出現）
+		$('recent').querySelectorAll('[data-rmroute]').forEach((b) => b.addEventListener('click', (e) => {
 			e.stopPropagation();
-			const x = favRoutes[+b.dataset.unpin];
-			B.store.favRoutes.toggle(x.r, x.b, x.s || 1, x.d);
+			const x = favRoutes[+b.dataset.rmroute];
+			if (x.pinned) {
+				B.store.favRoutes.toggle(x.r, x.b, x.s || 1, x.d);
+				toast('已取消常搭');
+			} else {
+				B.store.routeVisits.hide(x.r, x.b);
+				toast('已從常搭路線移除');
+			}
 			renderRecent();
-			toast('已取消常搭');
 		}));
 		$('recent').querySelectorAll('[data-r]').forEach((b) => b.addEventListener('click', (e) => {
 			if (e.target.closest('[data-del]')) return;     // 刪除鈕已另行處理
@@ -378,8 +391,12 @@
 		}));
 	}
 
-	/** 從離線 routeList 取某路線某方向的終點名 */
+	/**
+	 * 從離線 routeList 取某路線某方向的終點名。
+	 * 必須容忍 DB 尚未載入：boot() 會在載入資料前先 renderRecent() 一次（見下）。
+	 */
 	function routeDestName(routeNo, bound) {
+		if (!DB || !DB.routeList) return '';
 		for (const [no, b, , dest] of DB.routeList) {
 			if (no === routeNo && b === bound) return dest;
 		}
@@ -387,14 +404,26 @@
 	}
 
 	$('clear-data').addEventListener('click', () => {
-		if (!confirm('確定清除所有搜尋記錄、常搭路線與常到車站？此操作無法復原。')) return;
+		const nR = B.store.recent.load().length;
+		const nF = B.store.favorites.load().length;
+		const nPinned = B.store.favRoutes.load().length;
+		const nAuto = B.store.routeVisits.top(20).length;
+		const nGeo = JSON.parse(localStorage.getItem('buseta.geoCache') || '[]').length;
+		if (!confirm(
+			'確定清除此裝置上的所有資料？\n\n' +
+			`· 最近搜尋（${nR} 項）\n` +
+			`· 常搭路線（釘選 ${nPinned} ＋ 自動統計 ${nAuto}）\n` +
+			`· 常到車站（${nF} 項）\n` +
+			`· 地標搜尋緩存（${nGeo} 項，下次搜尋需重新連線查詢）\n\n` +
+			'此操作無法復原。'
+		)) return;
 		B.store.recent.clear();
 		B.store.favorites.clear();
 		B.store.favRoutes.clear();
 		B.store.routeVisits.clear();
 		B.clearGeoCache();
 		renderRecent();
-		toast('已清除');
+		toast('已清除本機資料');
 	});
 
 	/* ============ M3 附近站列表 ============ */
@@ -807,6 +836,7 @@
 		state.route = { no: opts.no, bound: opts.dir, svc: opts.svc, dest: opts.dest };
 
 		// 自動訪問統計：首次不計（視為試用），第二次起才累加
+		// v.hidden = 用戶曾手動移除此路線 → 不顯示任何提示
 		const v = B.store.routeVisits.visit(opts.no, opts.dir);
 
 		$('rt-no').textContent = opts.no;
@@ -817,7 +847,7 @@
 		// 構建方向分頁（零網絡）
 		buildDirTabs(opts.no, opts.dir, opts.svc);
 		setRouteDir(opts.dir, opts.svc, { seqs: opts.seqs, stopIds: opts.stopIds },
-			!v.counted ? '首次查看這條路線，第二次起才會記入常搭' : null);
+			!v.counted && !v.hidden ? '首次查看這條路線，第二次起才會記入常搭' : null);
 		});
 	}
 
