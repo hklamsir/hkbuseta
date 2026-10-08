@@ -1,10 +1,10 @@
 {
-  "built": "2026-10-07T00:51:53.586Z",
-  "updated": "2026-10-07 00:51",
-  "buildId": "47912d77",
+  "built": "2026-10-08T01:08:11.881Z",
+  "updated": "2026-10-08 01:08",
+  "buildId": "31a02a2a",
   "stops": 6753,
   "routes": 1605,
-  "routeStops": 36337,
+  "routeStops": 36335,
   "files": [
     {
       "name": "stops.json.gz",
@@ -13,8 +13,8 @@
     },
     {
       "name": "routes.json.gz",
-      "raw": 548154,
-      "gz": 164783
+      "raw": 548125,
+      "gz": 164778
     }
   ]
 }
