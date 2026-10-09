@@ -37,6 +37,9 @@ jobs:
 
       # 防呆：官方 API 異常回傳空資料時中止，不要把空資料推到 production。
       # 門檻取現況（6,753 站 / 1,605 路線 / 36,337 關聯）的一個安全下界。
+      # 健性檢查：top-level 欄位（stops/routes/routeStops）係 KMB-only 向後兼容值，
+      # 唔會反映城巴。M9 合併後每日都會建城巴資料，故額外加 companies.ctb 守衛，
+      # 防止城巴 API 靜默失效時照樣 push 純九巴資料。
       - name: 資料健全性檢查
         run: |
           node -e "
@@ -45,8 +48,17 @@ jobs:
           if (m.stops < 6000)         bad.push('車站數 ' + m.stops + ' < 6000');
           if (m.routes < 1500)        bad.push('路線數 ' + m.routes + ' < 1500');
           if (m.routeStops < 30000)   bad.push('路線站關聯 ' + m.routeStops + ' < 30000');
+          if (!m.companies || !m.companies.ctb) {
+            bad.push('缺少城巴資料區塊（companies.ctb 不存在）');
+          } else {
+            const c = m.companies.ctb;
+            if (c.stops < 2000)       bad.push('城巴車站數 ' + c.stops + ' < 2000');
+            if (c.routes < 400)       bad.push('城巴路線數 ' + c.routes + ' < 400');
+            if (c.routeStops < 10000) bad.push('城巴路線站關聯 ' + c.routeStops + ' < 10000');
+          }
           if (bad.length) { console.error('❌ 資料異常，中止部署：\n  - ' + bad.join('\n  - ')); process.exit(1); }
-          console.log('✅ 資料健全（' + m.stops + ' 站 / ' + m.routes + ' 路線 / ' + m.routeStops + ' 關聯）');
+          const c = m.companies && m.companies.ctb;
+          console.log('✅ 資料健全（九巴 ' + m.stops + ' 站 / ' + m.routes + ' 路線 / ' + m.routeStops + ' 關聯；城巴 ' + (c ? c.stops + ' 站 / ' + c.routes + ' 路線 / ' + c.routeStops + ' 關聯' : '無') + '）');
           console.log('   buildId: ' + m.buildId);
           "
 
