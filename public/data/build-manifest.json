@@ -1,7 +1,7 @@
 {
-  "built": "2026-10-09T03:19:06.833Z",
-  "updated": "2026-10-09 03:19",
-  "buildId": "c6a632b8",
+  "built": "2026-10-09T05:16:43.292Z",
+  "updated": "2026-10-09 05:16",
+  "buildId": "479b5bd8",
   "stops": 6752,
   "routes": 1605,
   "routeStops": 36335,
@@ -39,7 +39,7 @@
     },
     "ctb": {
       "label": "城巴及新巴",
-      "buildId": "8db4ad56",
+      "buildId": "7a078af5",
       "stops": 2587,
       "routes": 814,
       "routeStops": 17404,
@@ -51,10 +51,19 @@
         },
         {
           "name": "ctb-routes.json.gz",
-          "raw": 251341,
-          "gz": 78188
+          "raw": 288769,
+          "gz": 92817
         }
       ]
     }
+  },
+  "cross": {
+    "pairs": 1097,
+    "oneToMany": 53,
+    "matchedCtb": 1151,
+    "dirs": 54,
+    "sharedRoutes": 149,
+    "collide": 55,
+    "uncertain": 40
   }
 }
