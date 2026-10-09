@@ -1,8 +1,8 @@
 # BusETA
 
-輸入一個香港地標（商場、大廈、碼頭、機場），揀一個搜尋半徑，列出範圍內所有**九巴及龍運**巴士站，再逐站睇實時到站時間。點路線號可睇全線站序。
+輸入一個香港地標（商場、大廈、碼頭、機場），揀一個搜尋半徑，列出範圍內所有**九巴及龍運、城巴及新巴**巴士站，再逐站睇實時到站時間。同一物理車站若兩家都有站，會自動合併顯示，唔使跳嚟跳去。點路線號可睇全線站序。
 
-純前端、零後端、零 API key。已離線打包全港 6,753 個車站與 1,605 條路線，只有實時到站時間需要網絡。
+純前端、零後端、零 API key。已離線打包全港 **9,339 個車站**與 **2,419 條路線**（九巴及龍運 6,752 站／1,605 線 ＋ 城巴及新巴 2,587 站／814 線），只有實時到站時間需要網絡。
 
 ---
 
@@ -32,10 +32,10 @@ node scripts/bump-sw.mjs
 `.github/workflows/update-data.yml` 每日 **05:30 HKT**（cron `30 21 * * *` UTC）自動執行：
 
 1. `build-data.mjs` 抓官方 API → 精簡 → gzip
-2. 資料健全性檢查（車站 < 6,000／路線 < 1,500／關聯 < 30,000 即中止，防止異常資料推上 production）
+2. 資料健全性檢查（九巴：車站 < 6,000／路線 < 1,500／關聯 < 30,000；城巴：車站 < 2,000／路線 < 400／關聯 < 10,000；任一不達標即中止，防止異常資料推上 production）
 3. 比較 `buildId`；**只在資料有實質變化時**才 `bump-sw.mjs` → commit → push → 觸發 Cloudflare 自動部署
 
-`buildId` 只反映**資料內容**（gz 已剔除時間戳，hash 計算基於解壓後內容），所以官方資料無變化時不會部署，用戶亦不會無故被逼重新下載 339 KB 離線資料。首次手動測試可到 Actions 頁按 **Run workflow**。
+`buildId` 只反映**資料內容**（gz 已剔除時間戳，hash 計算基於解壓後內容，並同時涵蓋九巴與城巴兩家），所以官方資料無變化時不會部署，用戶亦不會無故被逼重新下載約 480 KB 離線資料。首次手動測試可到 Actions 頁按 **Run workflow**。
 
 ---
 
@@ -52,16 +52,18 @@ public/
 │   └── app.js          應用邏輯：搜尋、附近站、ETA 輪詢、路線站序、地圖
 ├── vendor/leaflet.*    Leaflet 1.9.4（本地化，支援 PWA 離線）
 ├── data/
-│   ├── stops.json.gz   車站表 178 KB
-│   ├── routes.json.gz  路線站序 161 KB
+│   ├── stops.json.gz   九巴及龍運車站表 178 KB
+│   ├── routes.json.gz  九巴及龍運路線站序 161 KB
+│   ├── ctb-stops.json.gz  城巴及新巴車站表 52 KB
+│   ├── ctb-routes.json.gz 城巴及新巴路線站序 91 KB
 │   └── build-manifest.json
 └── icons/              SVG + PNG（含 maskable）
 
 scripts/
-├── build-data.mjs      離線資料打包（4.24MB → 339 KB，8%）
+├── build-data.mjs      離線資料打包（→ 480 KB）
 ├── bump-sw.mjs         Service Worker 版本戳（部署前必須跑；純內容 hash，無變不改 sw.js）
 ├── serve.mjs           零依賴開發伺服器
-├── verify.mjs          Playwright 端到端驗證（139 項）
+├── verify.mjs          Playwright 端到端驗證（202 項）
 └── verify-offline.mjs  離線模式驗證（13 項）
     verify-sw-version.mjs  SW 版本追蹤驗證
 
@@ -86,9 +88,9 @@ docs/
 
 ## 核心設計
 
-### 離線資料打包（339 KB）
+### 離線資料打包（480 KB）
 
-官方原始資料 4.24 MB，經三步壓縮至 **339 KB（8%）**：
+官方原始資料（九巴及龍運 ＋ 城巴及新巴）經三步壓縮至 **480 KB**（九巴及龍運 340 KB ＋ 城巴及新巴 144 KB）：
 
 | 步驟 | 效果 |
 |---|---|
@@ -99,7 +101,7 @@ docs/
 
 結果：**用戶首次開啟零等待**，且**離線時仍可查「附近有咩站」「路線經過咩站」**。
 
-### 適配器介面（為多營辦商預留）
+### 適配器介面（多營辦商支援）
 
 ```javascript
 BusETA.registerAdapter({
@@ -112,7 +114,7 @@ BusETA.registerAdapter({
 });
 ```
 
-新增城巴／新巴只需註冊新 adapter，UI 與搜尋邏輯不需改動。唯一要處理的是**多營辦商 stop ID 對齊**（同一物理站可能有兩個系統的 ID）。
+已實作 **城巴及新巴（CTB）adapter**（M8）：註冊新 adapter 後，UI 與搜尋邏輯無須改動。跨公司顯示的關鍵是多營辦商 stop ID 對齊 —— 同一物理站可能有兩個系統的 ID，build 時預計算 `cross` 配對表（1,097 組配對、149 條共享路線、54 組方向對應），搜尋與 ETA 頁自動合併兩家路線（M9）。
 
 > `fetchSingleStopEta` **刻意不列入 `registerAdapter` 必填清單** —— adapter 介面不應因可選功能而收窄未來擴充點。未實作該方法的 adapter，路線頁仍可正常顯示離線站序，只是不顯示選中站 ETA。
 
@@ -224,7 +226,7 @@ Nominatim 是 OSM 提供的免費公開服務，其[使用政策](https://operat
 
 ### 開機時序：DB 未載入前不可呼叫依賴 DB 的 UI
 
-離線資料要解壓 339 KB gzip，通常需 0.5–2 秒。這段時間內使用者已經可以操作 UI，所以任何讀 `DB` 的渲染函式都可能撞到 `DB === null`。
+離線資料要解壓約 480 KB gzip，通常需 0.5–2 秒。這段時間內使用者已經可以操作 UI，所以任何讀 `DB` 的渲染函式都可能撞到 `DB === null`。
 
 **規則：`renderRecent()` 依賴 `DB`**（內部 `routeDestName()` 要查 `DB.routeList` 取終點名），因此：
 
@@ -236,7 +238,7 @@ Nominatim 是 OSM 提供的免費公開服務，其[使用政策](https://operat
 
 ### 距離搜尋
 
-`findNearbyStops()` 先用經緯度矩形預篩（500m 約命中 50-200 個站），再精算 Haversine。實測 **6,753 站全掃描 < 1 ms**，列表計算零網絡請求。
+`findNearbyStops()` 先用經緯度矩形預篩（500m 約命中 50-200 個站），再精算 Haversine。實測 **9,339 站全掃描 < 1 ms**，列表計算零網絡請求。
 
 ### ETA 輪詢
 
@@ -273,7 +275,7 @@ Nominatim 是 OSM 提供的免費公開服務，其[使用政策](https://operat
 
 | 限制 | 說明 |
 |---|---|
-| 只支援九巴／龍運 | 城巴／新巴需新增 adapter；介面會提示「此站可能只有城巴／新巴路線」 |
+| 路線詳情頁仍單一營辦商（XR4） | 搜尋／附近站／ETA 頁已跨公司合併；唯獨點入路線詳情頁時只顯示該路線所屬公司資料 |
 | 離線時無地圖底圖 | 底圖來自 OpenStreetMap 圖磚服務；vector 圖層仍準確 |
 | Nominatim 每日 1,000 次上限 | 已做兩層快取；100 用戶高頻使用仍可能觸及上限，需適配 Google Places 或自建 POI 庫 |
 | 預打包資料每日過期 | 需定期跑 `build-data.mjs`；介面顯示資料更新時間 |
@@ -286,9 +288,11 @@ Nominatim 是 OSM 提供的免費公開服務，其[使用政策](https://operat
 
 - 運輸署「九龍巴士及龍運巴士路線實時到站數據」
   https://data.gov.hk/tc-data/dataset/hk-td-tis_21-etakmb
+- 運輸署「城巴及新巴路線實時到站數據」（2023 年專營權合併後，原新巴路線已納入城巴資料）
+  https://data.gov.hk/tc-data/dataset/hk-td-tis_21-citybus
 - API 規格 v1.05（2024-10-23）、數據字典 v1.02（2021-05-10）
-- 原始數據知識產權屬九龍巴士（一九三三）有限公司及龍運巴士有限公司
+- 原始數據知識產權屬九龍巴士（一九三三）有限公司及龍運巴士有限公司、城巴有限公司
 - 地標地理編碼：Nominatim（OpenStreetMap，ODbL）
 - 地圖底圖：© OpenStreetMap contributors
 
-**本 app 非九巴或運輸署官方產品。**
+**本 app 非九巴、城巴或運輸署官方產品。**
