@@ -8,97 +8,31 @@
 
 	const B = window.BusETA;
 
-	/* ============ 公司切換（M8：多營辦商） ============ */
+	/* ============ 公司資料（M8 + M9） ============ */
 
-	const LS_COMPANY = 'buseta.company';
 	const DEFAULT_CO = 'kmb';
 
-	/** 讀取用戶偏好（未選過 → 九巴）。**僅影響顯示排序/主題色**，唔影響載入咩資料。 */
-	function currentCo() {
-		try {
-			const v = localStorage.getItem(LS_COMPANY);
-			return v && B.TransportAdapters[v] ? v : DEFAULT_CO;
-		} catch { return DEFAULT_CO; }
-	}
-
 	/**
-	 * @type {object} 偏好公司 adapter（決定 nearby 排序優先、主題色、搜尋預設）
+	 * 顯示用代表公司（主題色、顯示名優先次序）。
+	 *
+	 * ⚠️ M9 改動（2026-10-09）：公司切換器已**移除**。
+	 *    原因（實測證實）：M9 已同時載入兩家並合併顯示，切換器**不再過濾任何東西** ——
+	 *    附近站清單在兩種偏好下完全相同（16 項、順序、顯示名全部一樣）。
+	 *    它只剩影響「主題色」與「顯示名優先次序」，唔值得佔用搜尋頁頂部空間。
 	 */
-	let adapter = B.getAdapter(currentCo());
+	const adapter = B.getAdapter(DEFAULT_CO);
 
 	/** @type {Record<string,object>} 已載入的離線 store：{ kmb, ctb } —— M9 兩家都載 */
 	let DBS = {};
 	/** 跨公司查詢層（M9）；只有一家有 cross 資料時為 null */
 	let XQ = null;
 
-	/**
-	 * 偏好切換。**唔重載資料**（兩家都已載入）→ 零延遲。
-	 * @returns {boolean} 是否真的切換了
-	 */
-	function setCompany(co) {
-		if (!B.TransportAdapters[co] || co === currentCo()) return false;
-		try { localStorage.setItem(LS_COMPANY, co); } catch { /* 私隱模式 */ }
-		adapter = B.getAdapter(co);
-		applyBranding();
-		renderCompanySwitcher();
-		renderRecent();
-		return true;
-	}
-
-	/** @type {object|null} 偏好公司的離線資料（沿用舊 DB 變數名，減少改動面） */
+	/** @type {object|null} 代表公司的離線資料（沿用舊 DB 變數名，減少改動面） */
 	let DB = null;
 	/** 啟動載入離線資料的 Promise（避免重複載入）。**可 reset** —— 見 reloadAll。 */
 	let booting = null;
 	/** boot 世代號：舊載入結果不可覆蓋新結果（見 reloadAll 的 race 處理） */
 	let bootGen = 0;
-
-	/**
-	 * 切換偏好後重新整理畫面（唔重載 gz）。
-	 * 仍要清 state：附近站／ETA／路線的內容屬於舊偏好。
-	 */
-	function resetViewForCo() {
-		stopPolling();
-		stopRoutePolling();
-		state.place = null;
-		state.nearby = [];
-		state.stop = null;
-		state.eta = [];
-		state.lastFetch = 0;
-		state.route = null;
-		state.routeStops = [];
-		state.routeDir = null;
-		state.routeSel = null;
-		state.routeEta = [];
-		state.routeLastFetch = 0;
-		state.etaFrom = null;
-		state.routeFrom = null;
-
-		$('search-results').innerHTML = '';
-		$('search-status').innerHTML = '';
-		$('recent').innerHTML = '';
-		$('nb-list').innerHTML = '';
-		$('eta-list').innerHTML = '';
-		$('rt-list').innerHTML = '';
-		go('search');
-		q.value = '';
-		$('search-field').classList.remove('has-value');
-		if (map) $('map').classList.remove('on');
-	}
-
-	/**
-	 * 完整重載兩家資料（首次 boot，或伺服器推新版本後）。
-	 * 保留舊語義：booting 可 reset + 世代號防 race。
-	 */
-	function reloadAll() {
-		booting = null;
-		bootGen++;
-		DB = null;
-		DBS = {};
-		XQ = null;
-		B.resetCrossIndex();
-		$('data-stamp').textContent = '載入離線資料中…';
-		boot();
-	}
 
 	/* 畫面狀態 */
 	const state = {
@@ -136,7 +70,22 @@
 
 	const POLL_MS = 15000;   // 九巴預設輪詢間隔（規劃書 §5.4）
 	/** 當前營辦商的輪詢間隔（CTB 每分鐘才更新一次 → 30s，避免浪費 4× 請求） */
-	function pollMs() { return adapter.pollMs || POLL_MS; }
+	/**
+	 * 輪詢間隔（毫秒）。
+	 *
+	 * ⚠️ M9：合併顯示兩家後，唔可以用單一 adapter 的 pollMs ——
+	 *    九巴 15s（實時）、城巴 30s（官方每分鐘更新）。取**兩者中較短**的，
+	 *    否則城巴 ETA 會停喺 30s，但九巴每 15s 都更新 → 畫面_update時間戳
+	 *    跳動而城巴班次唔郁，令人困惑。
+	 */
+	function pollMs() {
+		let min = POLL_MS;
+		for (const co of Object.keys(B.TransportAdapters)) {
+			const a = B.TransportAdapters[co];
+			if (a?.pollMs) min = Math.min(min, a.pollMs);
+		}
+		return min || POLL_MS;
+	}
 
 	/**
 	 * 公司相關文案與品牌色。
@@ -169,63 +118,45 @@
 		}
 	};
 	function brand() { return BRAND[adapter.id] || BRAND[DEFAULT_CO]; }
-	/** 另一家公司（用於空結果引導用戶切換） */
-	function otherCo() {
-		return adapter.id === 'kmb' ? 'ctb' : 'kmb';
-	}
-	function otherLabel() { return (BRAND[otherCo()] || {}).label || ''; }
 
-	/** 把公司化的文案與主題色套到 UI（切換公司時呼叫） */
+	/**
+	 * 公司色點（收藏／常搭路線列表用）。
+	 *
+	 * ⚠️ M9：切換器移除後，收藏／常搭路線改為**跨公司顯示**（loadAll）——
+	 *    否則用戶會以為收藏「消失咗」。但兩家有大量同號路線（九巴 1 與城巴 1
+	 *    完全不同），故每項都要標示屬邊家，否則無法分辨。
+	 */
+	function coDot(co) {
+		const c = co || DEFAULT_CO;
+		const a = B.TransportAdapters[c];
+		return `<i class="co-dot ${esc(c)}" title="${esc(a ? a.label : c)}"></i>`;
+	}
+
+	/**
+	 * 套用主題色與文案。
+	 *
+	 * ⚠️ M9：切換器已移除 → 主題色**固定**用代表色（九巴紅）；
+	 *    但副標題與資料來源**必須同時列兩家公司** —— app 已合併顯示兩家路線，
+	 *    只標一家會造成歸屬不完整（data.gov.hk 開放數據條款要求標明來源與版權）。
+	 */
 	function applyBranding() {
 		const br = brand();
 		const root = document.documentElement.style;
 		// 三個色變數一組改：CSS 內 --brand / --brand-dark / --brand-soft 都用於
-		// 按鈕、標籤、聚焦框，只改其中一個會令深色底仲係九巴紅
+		// 按鈕、標籤、聚焦框，只改其中一個會令深色底仲係舊色
 		root.setProperty('--brand', br.brand);
 		root.setProperty('--brand-dark', br.dark);
 		root.setProperty('--brand-soft', br.soft);
 		const meta = document.querySelector('meta[name="theme-color"]');
 		if (meta) meta.setAttribute('content', br.brand);
-		// ⚠️ 唔好寫死「巴士」二字：label 本身已含「巴」（城巴及新巴 + 巴士 = 城巴及新巴巴士）。
-		// 故直接用 label 即可。
-		const sub = $('app-sub');
-		if (sub) sub.textContent = `${br.label}到站時間`;
 		const attr = $('data-attribution');
-		if (attr) attr.innerHTML = br.attribution;
+		if (attr) attr.innerHTML = BRAND.kmb.attribution + '<br>' + BRAND.ctb.attribution;
 	}
 
 	/**
-	 * 渲染公司切換器（segmented control）。
-	 *
-	 * ⚠️ **M9 語意已變**：由「載入邊家公司」改為「**顯示偏好**」。
-	 *    因為跨公司合併顯示需要同時載入兩家（實測 54ms），切換已無需重載 gz。
-	 *    偏好只影響：附近站排序優先、主題色、搜尋結果文案。
-	 *
-	 * 只放喺搜尋頁（計劃書 Phase 3）：深層頁切換要清多一倍狀態，風險高。
-	 * 由已註冊 adapter 動態生成 → 加第三家（NLB）唔使改 UI。
+	 * 重繪底部資料統計。
+	 * M9 後無需喺切換偏好時重繪（切換器已移除），但保留函式供 boot() 與未來重載使用。
 	 */
-	function renderCompanySwitcher() {
-		const box = $('co-switch');
-		if (!box) return;
-		const list = B.listAdapters();
-		if (list.length < 2) { box.hidden = true; return; }
-		box.hidden = false;
-		const cur = adapter.id;
-		box.innerHTML = list.map((a) =>
-			`<button data-co="${esc(a.id)}" class="${a.id === cur ? 'on' : ''}"
-				aria-pressed="${a.id === cur}">${esc(a.label)}</button>`
-		).join('');
-		box.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => {
-			if (b.dataset.co === cur) return;
-			if (setCompany(b.dataset.co)) {
-				// 零重載：只重畫受影響的部分
-				resetViewForCo();
-				updateDataStamp();
-			}
-		}));
-	}
-
-	/** 重繪底部資料統計（切換偏好後站數統計會變） */
 	function updateDataStamp() {
 		if (!DB) return;
 		const ids = Object.keys(DBS);
@@ -243,18 +174,6 @@
 		}
 		$('data-stamp').textContent =
 			`離線資料：${phys.toLocaleString()} 個車站 ${extra}· ${DB.routeList.length.toLocaleString()} 條路線 · 更新於 ${DB.updated}`;
-	}
-
-	/** 切換公司期間的輕量 loading（載 gz 需 0.5-2s） */
-	function showCoLoading(label) {
-		const box = $('co-loading');
-		if (!box) return;
-		box.innerHTML = `<div class="loading"><div class="spinner"></div>
-			<div style="font-size:13px">載入${esc(label)}離線資料…</div></div>`;
-	}
-	function hideCoLoading() {
-		const box = $('co-loading');
-		if (box) box.innerHTML = '';
 	}
 
 	const ROUTE_MAX_AUTO = 5;   // 常搭路線：自動統計區只顯示 topN
@@ -352,7 +271,6 @@
 		// boot() 失敗時唔快取 Promise，容許用戶按「重新載入」再試
 		const r = await my;
 		if (!r) booting = null;
-		else hideCoLoading();
 		return r;
 	}
 
@@ -485,7 +403,7 @@
 		const items = sorted.map((c, i) => {
 			const meta = [
 				c.type ? typeLabel(c.type) : '',
-				c.nearest != null ? `最近${brand().short}站 ${c.nearest} 米` : `附近未見${brand().short}站`
+				c.nearest != null ? `最近巴士站 ${c.nearest} 米` : '附近未見巴士站'
 			].filter(Boolean).join(' · ');
 			// 同名命中點無法靠名稱分辨 → 用標籤明確指出性質
 			// 完全同名時仍要看類型：「淘大花園」有 residential 與 bus_stop 兩筆同名
@@ -575,20 +493,30 @@
 	let favTab = 'route';
 
 	function renderRecent() {
-		const co = adapter.id;
 		const r = B.store.recent.load();
-		const f = B.store.favorites.load(co);
-		const fr = B.store.favRoutes.load(co);
+		// ⚠️ M9：切換器已移除 → 收藏／常搭路線**跨公司顯示**（loadAll），
+		//    否則用戶會以為收藏「消失咗」。資料層仍按 co 隔離（避免 stop ID 撞名），
+		//    顯示時用公司色點標示來源（見 coDot）。
+		const f = B.store.favorites.loadAll();
+		const fr = B.store.favRoutes.loadAll();
 		let html = '';
 
 		// 常搭路線：手動釘選（永在最前）+ 自動統計（未釘選且達門檻者）
+		// ⚠️ pinnedKeys 必須連 co 計：兩家有同號路線（九巴 1 ≠ 城巴 1），
+		//    淨用 route|bound 會令城巴 1 被九巴 1 誤蓋。
 		const pinned = fr.map((x) => ({ ...x, pinned: true }));
-		const pinnedKeys = new Set(fr.map((x) => `${x.r}|${x.b}`));
-		const auto = B.store.routeVisits.top(20, co)
-			.filter((x) => !pinnedKeys.has(`${x.route}|${x.bound}`))
+		const pinnedKeys = new Set(fr.map((x) => `${x.co || DEFAULT_CO}|${x.r}|${x.b}`));
+		// routeVisits 無 loadAll（key 帶 co 前綴）→ 逐家取再合併
+		const autoAll = [
+			...B.store.routeVisits.top(20, 'kmb').map((x) => ({ ...x, co: 'kmb' })),
+			...B.store.routeVisits.top(20, 'ctb').map((x) => ({ ...x, co: 'ctb' }))
+		].sort((a, b) => b.count - a.count);
+		const auto = autoAll
+			.filter((x) => !pinnedKeys.has(`${x.co}|${x.route}|${x.bound}`))
 			.slice(0, ROUTE_MAX_AUTO)
 			.map((x) => ({
-				r: x.route, b: x.bound, s: null, d: routeDestName(x.route, x.bound),
+				co: x.co, r: x.route, b: x.bound, s: null,
+				d: routeDestName(x.co, x.route, x.bound),
 				count: x.count, pinned: false
 			}));
 		const favRoutes = [...pinned, ...auto];
@@ -613,7 +541,8 @@
 			else if (favTab === 'stop' && !f.length) favTab = 'route';
 
 			const rows = favTab === 'route'
-				? favRoutes.map((x, i) => `<button class="result" data-fr="${i}">
+				? favRoutes.map((x, i) => `<button class="result" data-fr="${i}" data-co="${esc(x.co || DEFAULT_CO)}">
+					${coDot(x.co)}
 					<svg style="width:18px;height:18px;flex-shrink:0;${x.pinned ? 'fill:#f5a623;stroke:#f5a623' : 'fill:none;stroke:var(--text-3);stroke-width:2;stroke-linejoin:round'}"><use href="#i-star"/></svg>
 					<span class="body">
 						<span class="name">${esc(x.r)} <span class="sub2">往 ${esc(x.d || '—')}</span></span>
@@ -625,10 +554,11 @@
 						<svg><use href="#i-x"/></svg>
 					</span>
 				</button>`).join('')
-				: f.map((x) => `<button class="result" data-f="${esc(x.stop)}">
+				: f.map((x) => `<button class="result" data-f="${esc(x.stop)}" data-co="${esc(x.co || DEFAULT_CO)}">
+					${coDot(x.co)}
 					<svg style="width:18px;height:18px;fill:#f5a623;stroke:#f5a623;flex-shrink:0"><use href="#i-star"/></svg>
 					<span class="body"><span class="name">${esc(x.name)}</span></span>
-					<span class="row-del" data-unfav="${esc(x.stop)}" role="button" aria-label="移除 ${esc(x.name)}" title="移除">
+					<span class="row-del" data-unfav="${esc(x.stop)}" data-co="${esc(x.co || DEFAULT_CO)}" role="button" aria-label="移除 ${esc(x.name)}" title="移除">
 						<svg><use href="#i-x"/></svg>
 					</span>
 				</button>`).join('');
@@ -659,11 +589,12 @@
 		$('recent').querySelectorAll('[data-fr]').forEach((b) => b.addEventListener('click', async (e) => {
 			if (e.target.closest('[data-rmroute]')) return;   // 移除鈕已另行處理
 			const x = favRoutes[+b.dataset.fr];
+			const xco = x.co || DEFAULT_CO;
 			boot().then(() => {
-				if (!DB) return;
-				B.store.routeVisits.visit(adapter.id, x.r, x.b);
+				if (!DBS[xco]) return;
+				B.store.routeVisits.visit(xco, x.r, x.b);
 				openRoute({
-					no: x.r, dir: x.b, svc: x.s || 1, dest: x.d || '',
+					no: x.r, dir: x.b, svc: x.s || 1, dest: x.d || '', co: xco,
 					seqs: null,   // 從常搭清單進入無特定出發站 → 只顯示全線站序
 					from: 'recent' // 返回時直接回首頁
 				});
@@ -673,11 +604,12 @@
 		$('recent').querySelectorAll('[data-rmroute]').forEach((b) => b.addEventListener('click', (e) => {
 			e.stopPropagation();
 			const x = favRoutes[+b.dataset.rmroute];
+			const xco = x.co || DEFAULT_CO;
 			if (x.pinned) {
-				B.store.favRoutes.toggle(adapter.id, x.r, x.b, x.s || 1, x.d);
+				B.store.favRoutes.toggle(xco, x.r, x.b, x.s || 1, x.d);
 				toast('已取消常搭');
 			} else {
-				B.store.routeVisits.hide(adapter.id, x.r, x.b);
+				B.store.routeVisits.hide(xco, x.r, x.b);
 				toast('已從常搭路線移除');
 			}
 			renderRecent();
@@ -695,12 +627,14 @@
 		}));
 		$('recent').querySelectorAll('[data-f]').forEach((b) => b.addEventListener('click', (e) => {
 			if (e.target.closest('[data-unfav]')) return;
-			const x = f.find((y) => y.stop === b.dataset.f);
-			if (x) openEta({ stop: x.stop, name: x.name, lat: x.lat, lng: x.lng, from: 'recent' });
+			// ⚠️ 跨公司顯示後，stop ID 可能兩家都有 → 必須連 co 一起比對
+			const bco = b.dataset.co || DEFAULT_CO;
+			const x = f.find((y) => y.stop === b.dataset.f && (y.co || DEFAULT_CO) === bco);
+			if (x) openEta({ stop: x.stop, co: bco, name: x.name, lat: x.lat, lng: x.lng, from: 'recent' });
 		}));
 		$('recent').querySelectorAll('[data-unfav]').forEach((b) => b.addEventListener('click', (e) => {
 			e.stopPropagation();
-			B.store.favorites.toggle(adapter.id, { stop: b.dataset.unfav });
+			B.store.favorites.toggle(b.dataset.co || DEFAULT_CO, { stop: b.dataset.unfav });
 			renderRecent();
 			toast('已移除');
 		}));
@@ -708,11 +642,14 @@
 
 	/**
 	 * 從離線 routeList 取某路線某方向的終點名。
-	 * 必須容忍 DB 尚未載入：boot() 會在載入資料前先 renderRecent() 一次（見下）。
+	 * ⚠️ M9：跨公司顯示後必須傳 co —— 九巴 1（尖沙咀碼頭）與城巴 1（中環）完全不同，
+	 *    用錯 store 會顯示錯終點。
+	 * 必須容忍 store 尚未載入（renderRecent 會喺 boot 完成前先跑一次）。
 	 */
-	function routeDestName(routeNo, bound) {
-		if (!DB || !DB.routeList) return '';
-		for (const [no, b, , dest] of DB.routeList) {
+	function routeDestName(co, routeNo, bound) {
+		const store = DBS[co || DEFAULT_CO] || DB;
+		if (!store || !store.routeList) return '';
+		for (const [no, b, , dest] of store.routeList) {
 			if (no === routeNo && b === bound) return dest;
 		}
 		return '';
@@ -1111,8 +1048,7 @@
 		const list = state.eta;
 		if (!list.length) {
 			$('eta-list').innerHTML = emptyBox('此站暫時冇到站預報',
-				`可能不在服務時間內，或該站只有間歇服務。${brand().label}的行車時間表可參考官方網站。` +
-				`若此站應有${otherLabel()}路線，可切換公司再試。`);
+				'可能不在服務時間內，或該站只有間歇服務。九巴／龍運及城巴／新巴的行車時間表可參考官方網站。');
 			$('eta-status').textContent = `每 ${pollMs() / 1000} 秒更新`;
 			$('eta-stamp').textContent = '';
 			return;
@@ -1153,14 +1089,26 @@
 				return a.ts - b.ts;
 			});
 			// 同時間戳去重（多個行車位可能回同一班車）
+			//
+			// ⚠️ M9 修正（2026-10-09）：原邏輯收集到 3 個「有時間」的 ETA 就 break。
+			//    但合併行可能係「城巴有班次 + 九巴無預報（ts=null）」——
+			//    九巴嗰行會永遠收唔到，導致色點只顯示一間公司（迴歸：用戶見到 103 只有一粒色點）。
+			//    修正：每家公司**至少保留一行**，令色點正確反映兩家都有服務。
 			const uniq = [];
 			const seenTs = new Set();
+			const seenCo = new Set();
 			for (const o of arr) {
 				const k = o.ts === null ? `null${o.rmk}` : String(o.ts);
 				if (seenTs.has(k)) continue;
 				seenTs.add(k);
 				uniq.push(o);
-				if (uniq.filter((x) => x.ts !== null).length >= 3 && uniq.length >= 3) break;
+				// 每家至少一行（用嚟保留公司色點），否則該家會被完全隱形
+				if (o.co) seenCo.add(o.co);
+				// 收集夠 3 個有時間的 ETA **且** 每家都至少有一行 → 可以停
+				const timedCount = uniq.filter((x) => x.ts !== null).length;
+				const cosInGroup = new Set(arr.map((x) => x.co).filter(Boolean));
+				if (timedCount >= 3 && cosInGroup.size > 0 &&
+					[...cosInGroup].every((c) => seenCo.has(c))) break;
 			}
 			const g = uniq.length ? uniq : arr.slice(0, 3);
 			// ⚠️ M9：用正規化方向分區（否則跨公司同一方向會被分到兩區）
@@ -1200,13 +1148,20 @@
 				const stopIds = [...new Set(g.map((o) => o.stop).filter(Boolean))];
 				// ⚠️ M9：公司色點 —— 該行由邊家提供。若兩家都有，顯示兩粒。
 				//    因同一路線同一方向已合併成一行，用戶需要知道班次來自九巴定城巴。
+				//
+				// ⚠️ 色點**唔論有冇 ETA 都要顯示**（2026-10-09 用戶回報後檢視）：
+				//    原本以為「無 ETA 的行無色點」，實測發現全部行都有色點；
+				//    但同一站通常只屬一家 → 全部都係同一粒紅點，對「有冇預報」毫無區分作用。
+				//    故色點回歸「公司識別」單一語義；「有冇預報」改用整行淡化（no-eta class）表達。
 				const cos = [...new Set(g.map((o) => o.co).filter(Boolean))];
+				// 該行是否完全無預報（所有 ETA 的 ts 都係 null）→ 整行淡化
+				const noEta = g.every((o) => o.ts === null);
 				const dots = XQ && cos.length
 					? `<span class="co-dots">${cos.map((c) =>
 						`<i class="co-dot ${esc(c)}" title="${esc(B.getAdapter(c).label)}"></i>`).join('')}</span>`
 					: '';
 				const cosAttr = XQ ? ` data-cos="${esc(cos.join(','))}"` : '';
-				return `<button class="eta-row" data-ids="${esc(g.map((o) => o.seq).join(','))}"
+				return `<button class="eta-row${noEta ? ' no-eta' : ''}" data-ids="${esc(g.map((o) => o.seq).join(','))}"
 					data-stops="${esc(stopIds.join(','))}"
 					data-r="${esc(g[0].route)}" data-dir="${esc(g[0].dir)}" data-ndir="${esc(g[0]._dir || g[0].dir)}"
 					data-co="${esc(cos[0] || '')}"
@@ -1807,10 +1762,9 @@ $('map-close').addEventListener('click', () => $('map').classList.remove('on'));
 		addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch((e) => console.warn('[sw]', e)));
 	}
 
-	// 公司切換器 + 主題色必須喺 boot() 之前套用，
-	// 否則首屏會先用九巴紅顯示一瞬間才切成城巴黃（視覺閃爍）。
+	// 主題色必須喺 boot() 之前套用，否則首屏會有一瞬間嘅預設色閃爍。
+	// ⚠️ M9：公司切換器已移除（合併顯示兩家後，切換已無實質作用）
 	applyBranding();
-	renderCompanySwitcher();
 
 	boot();
 })();

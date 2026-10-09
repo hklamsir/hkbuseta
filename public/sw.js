@@ -23,7 +23,7 @@
  */
 
 /** 殼層版本戳：純內容 hash（無日期）。改殼層檔案後跑 scripts/bump-sw.mjs 自動更新 */
-const BUILD_STAMP = '311a96d8';
+const BUILD_STAMP = '95764691';
 
 /** 參與版本 hash 的殼層檔案（改動任何一個都會令快取名改變） */
 const VERSIONED = [

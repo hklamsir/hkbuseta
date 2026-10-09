@@ -225,47 +225,6 @@ body {
 }
 .range-seg { display: flex; background: var(--bg); border-radius: 8px; padding: 2px; flex: 1; }
 
-/* 公司切換器（M8 多營辦商）
-   只出現喺搜尋頁頂部。用 segmented control 樣式（與 .range-seg 一致嘅視覺語言），
-   令用戶一眼認出「呢個係可點擊嘅分頁」而非裝飾文字。
-   ⚠️ M9：切換已改為「顯示偏好」，切換**唔會**重載離線資料（兩家都載入）。 */
-.co-bar {
-	padding: 10px 14px 2px;
-	background: var(--surface);
-}
-.co-switch {
-	display: flex;
-	background: var(--bg);
-	border-radius: 8px;
-	padding: 2px;
-	gap: 2px;
-}
-.co-switch button {
-	flex: 1;
-	border: 0;
-	background: none;
-	padding: 8px 6px;
-	font-size: 13px;
-	font-family: inherit;
-	border-radius: 6px;
-	cursor: pointer;
-	color: var(--text-2);
-	font-weight: 500;
-	transition: background .15s, color .15s;
-	white-space: nowrap;
-	overflow: hidden;
-	text-overflow: ellipsis;
-}
-.co-switch button.on { background: var(--brand); color: #fff; }
-/* 觸控目標至少 44px 高（WCAG 2.5.5 / iOS HIG）—— 容器 padding 已貢獻 4px */
-@media (pointer: coarse) {
-	.co-switch button { padding: 12px 6px; }
-}
-.co-switch button:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
-
-/* 切換公司期間的載入提示（佔位避免版面跳動） */
-#co-loading:not(:empty) { padding: 12px 14px 4px; }
-
 /* ── M9 跨公司合併 ── */
 
 /* ETA 行的公司色點：同一路線同一方向已合併成一行，
@@ -475,6 +434,19 @@ body {
 	white-space: nowrap;
 }
 .eta-list { display: flex; gap: 8px; flex-shrink: 0; }
+
+/* 無預報的行（暫時冇預報 / 今日非服務日）
+   ⚠️ 為何唔用色點表達：同一站通常只屬一家 → 全部行都係同一粒色點，
+   毫無區分作用（M9 後的實測發現）。故色點回歸「公司識別」單一語義，
+   「有冇預報」改用整行淡化表達，令用戶一眼掃得出邊啲線有班次。 */
+.eta-row.no-eta .route-no,
+.eta-row.no-eta .dest {
+	opacity: .45;
+}
+.eta-row.no-eta .eta .t {
+	color: var(--muted);
+	font-weight: 400;
+}
 
 .eta {
 	text-align: right;
