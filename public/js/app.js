@@ -7,12 +7,32 @@
 	'use strict';
 
 	const B = window.BusETA;
-	const adapter = B.getAdapter('kmb');
 
-	/** @type {object|null} 離線資料 */
+	/* ============ 公司資料（M8 + M9） ============ */
+
+	const DEFAULT_CO = 'kmb';
+
+	/**
+	 * 顯示用代表公司（主題色、顯示名優先次序）。
+	 *
+	 * ⚠️ M9 改動（2026-10-09）：公司切換器已**移除**。
+	 *    原因（實測證實）：M9 已同時載入兩家並合併顯示，切換器**不再過濾任何東西** ——
+	 *    附近站清單在兩種偏好下完全相同（16 項、順序、顯示名全部一樣）。
+	 *    它只剩影響「主題色」與「顯示名優先次序」，唔值得佔用搜尋頁頂部空間。
+	 */
+	const adapter = B.getAdapter(DEFAULT_CO);
+
+	/** @type {Record<string,object>} 已載入的離線 store：{ kmb, ctb } —— M9 兩家都載 */
+	let DBS = {};
+	/** 跨公司查詢層（M9）；只有一家有 cross 資料時為 null */
+	let XQ = null;
+
+	/** @type {object|null} 代表公司的離線資料（沿用舊 DB 變數名，減少改動面） */
 	let DB = null;
-	/** 啟動載入離線資料的 Promise（避免重複載入） */
+	/** 啟動載入離線資料的 Promise（避免重複載入）。**可 reset** —— 見 reloadAll。 */
 	let booting = null;
+	/** boot 世代號：舊載入結果不可覆蓋新結果（見 reloadAll 的 race 處理） */
+	let bootGen = 0;
 
 	/* 畫面狀態 */
 	const state = {
@@ -48,8 +68,115 @@
 		routeFrom: null
 	};
 
-	const POLL_MS = 15000;   // 規劃書 §5.4
-	const ROUTE_MAX_AUTO = 5;   // 常搭路線：自動統計區只顯示 top N
+	const POLL_MS = 15000;   // 九巴預設輪詢間隔（規劃書 §5.4）
+	/** 當前營辦商的輪詢間隔（CTB 每分鐘才更新一次 → 30s，避免浪費 4× 請求） */
+	/**
+	 * 輪詢間隔（毫秒）。
+	 *
+	 * ⚠️ M9：合併顯示兩家後，唔可以用單一 adapter 的 pollMs ——
+	 *    九巴 15s（實時）、城巴 30s（官方每分鐘更新）。取**兩者中較短**的，
+	 *    否則城巴 ETA 會停喺 30s，但九巴每 15s 都更新 → 畫面_update時間戳
+	 *    跳動而城巴班次唔郁，令人困惑。
+	 */
+	function pollMs() {
+		let min = POLL_MS;
+		for (const co of Object.keys(B.TransportAdapters)) {
+			const a = B.TransportAdapters[co];
+			if (a?.pollMs) min = Math.min(min, a.pollMs);
+		}
+		return min || POLL_MS;
+	}
+
+	/**
+	 * 公司相關文案與品牌色。
+	 * 依家分兩家：九巴及龍運（紅）/ 城巴及新巴（黃）。
+	 * ⚠️ data.gov.hk 開放數據條款要求標明資料來源與知識產權，
+	 *    故 attribution 亦按公司切換（見 index.html 的 .foot 區塊）。
+	 */
+	const BRAND = {
+		kmb: {
+			label: '九巴及龍運',
+			short: '九巴',
+			brand: '#b3121b',
+			dark: '#8d0e15',
+			soft: '#fdeef0',
+			attribution: '資料來源：運輸署「九龍巴士及龍運巴士路線實時到站數據」' +
+				'（<a href="https://data.gov.hk/tc-data/dataset/hk-td-tis_21-etakmb" target="_blank" rel="noopener">data.gov.hk</a>）' +
+				' · 知識產權屬九巴及龍運'
+		},
+		ctb: {
+			label: '城巴及新巴',
+			short: '城巴',
+			// 城巴黃。用深琥珀色而非純黃：純 #FFD100 對比度不足，白字睇唔清
+			brand: '#a8790a',
+			dark: '#7d5606',
+			soft: '#fdf6e3',
+			attribution: '資料來源：運輸署「城市巴士路線實時到站數據」' +
+				'（<a href="https://data.gov.hk/tc-data/dataset/hk-td-tis_21-citybus" target="_blank" rel="noopener">data.gov.hk</a>）' +
+				' · 知識產權屬城巴' +
+				'<br><span style="opacity:.8">2023 年專營權合併後，原新巴路線已納入城巴資料</span>'
+		}
+	};
+	function brand() { return BRAND[adapter.id] || BRAND[DEFAULT_CO]; }
+
+	/**
+	 * 公司色點（收藏／常搭路線列表用）。
+	 *
+	 * ⚠️ M9：切換器移除後，收藏／常搭路線改為**跨公司顯示**（loadAll）——
+	 *    否則用戶會以為收藏「消失咗」。但兩家有大量同號路線（九巴 1 與城巴 1
+	 *    完全不同），故每項都要標示屬邊家，否則無法分辨。
+	 */
+	function coDot(co) {
+		const c = co || DEFAULT_CO;
+		const a = B.TransportAdapters[c];
+		return `<i class="co-dot ${esc(c)}" title="${esc(a ? a.label : c)}"></i>`;
+	}
+
+	/**
+	 * 套用主題色與文案。
+	 *
+	 * ⚠️ M9：切換器已移除 → 主題色**固定**用代表色（九巴紅）；
+	 *    但副標題與資料來源**必須同時列兩家公司** —— app 已合併顯示兩家路線，
+	 *    只標一家會造成歸屬不完整（data.gov.hk 開放數據條款要求標明來源與版權）。
+	 */
+	function applyBranding() {
+		const br = brand();
+		const root = document.documentElement.style;
+		// 三個色變數一組改：CSS 內 --brand / --brand-dark / --brand-soft 都用於
+		// 按鈕、標籤、聚焦框，只改其中一個會令深色底仲係舊色
+		root.setProperty('--brand', br.brand);
+		root.setProperty('--brand-dark', br.dark);
+		root.setProperty('--brand-soft', br.soft);
+		const meta = document.querySelector('meta[name="theme-color"]');
+		if (meta) meta.setAttribute('content', br.brand);
+		const attr = $('data-attribution');
+		if (attr) attr.innerHTML = BRAND.kmb.attribution + '<br>' + BRAND.ctb.attribution;
+	}
+
+	/**
+	 * 重繪底部資料統計。
+	 * M9 後無需喺切換偏好時重繪（切換器已移除），但保留函式供 boot() 與未來重載使用。
+	 */
+	function updateDataStamp() {
+		if (!DB) return;
+		const ids = Object.keys(DBS);
+		let phys = 0;
+		for (const id of ids) phys += DBS[id].stopById.size;
+		const idx = B.crossIndex(DBS.ctb);
+		let extra = '';
+		if (XQ && idx) {
+			const paired = new Set();
+			for (const [kmbId, ctbIds] of idx.fwd) {
+				paired.add('kmb|' + kmbId);
+				for (const c of ctbIds) paired.add('ctb|' + c);
+			}
+			extra = `（跨公司合併後約 ${(phys - paired.size).toLocaleString()} 個站） · `;
+		}
+		$('data-stamp').textContent =
+			`離線資料：${phys.toLocaleString()} 個車站 ${extra}· ${DB.routeList.length.toLocaleString()} 條路線 · 更新於 ${DB.updated}`;
+	}
+
+	const ROUTE_MAX_AUTO = 5;   // 常搭路線：自動統計區只顯示 topN
 	const $ = (id) => document.getElementById(id);
 	const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
@@ -57,31 +184,103 @@
 
 	async function boot() {
 		if (booting) return booting;
-		booting = (async () => {
+		// 記住本次所屬公司 + 世代號：期間若重載，結果必須丟棄
+		const co = adapter.id;
+		const gen = bootGen;
+		const my = (async () => {
 			// 網絡狀態要在載入資料前顯示（離線時即時見到提示）
 			updateNetState();
 			try {
 				const manifest = await (await fetch('data/build-manifest.json')).json();
-				DB = await adapter.loadStatic(manifest);
+
+				// ⚠️ M9：載入**所有**已註冊公司（實測兩家合共 54ms），
+				//    因為跨公司合併顯示需要同時有兩家資料。
+				//    任一家失敗都唔應該令整個 app 死掉 → 逐家 try。
+				const ids = Object.keys(B.TransportAdapters);
+				const loaded = await Promise.all(ids.map(async (id) => {
+					try {
+						return [id, await B.getAdapter(id).loadStatic(manifest)];
+					} catch (e) {
+						console.warn(`[boot] ${id} 離線資料載入失敗，該公司將不可用`, e);
+						return [id, null];
+					}
+				}));
+
+				// ⚠️ race guard：重載期間舊請求完成，唔可以覆蓋新結果。
+				if (gen !== bootGen) {
+					console.warn('[boot] 載入結果已過時（已重載），丟棄');
+					return false;
+				}
+
+				const stores = {};
+				for (const [id, st] of loaded) if (st) stores[id] = st;
+				const list = Object.keys(stores);
+				if (!list.length) throw new Error('所有公司的離線資料都載入失敗');
+
+				DBS = stores;
+				DB = stores[co] || stores[list[0]];
+				B.setCurrentStore(DB);
+				// 跨公司查詢層：需要兩家都在，且其中一家帶 cross 資料
+				XQ = list.length > 1 ? B.crossQueryable(stores) : null;
+				if (XQ && !XQ.hasCross) {
+					XQ = null;   // 離線資料未有 cross（舊 build）→ 退回單公司模式
+					console.warn('[boot] 離線資料無 cross 配對表（請重跑 build-data.mjs），以單公司模式顯示');
+				}
+
 				// 開發期測試鉤子（scripts/verify.mjs 需要讀取 DB 驗證距離計算）
 				// 生產環境不掛載，避免資料被外部腳本讀取
 				if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') {
 					window.__DB = DB;
+					window.__DBS = DBS;
+					window.__XQ = XQ;
 				}
-				$('data-stamp').textContent =
-					`離線資料：${DB.stopById.size.toLocaleString()} 個車站 · ${DB.routeList.length.toLocaleString()} 條路線 · 更新於 ${DB.updated}`;
+
+				// 統計：合併後的獨立物理站數（跨公司配對會令站數減少）
+				let phys = 0;
+				for (const id of list) phys += DBS[id].stopById.size;
+				let merged = 0;
+				const idx = B.crossIndex(DBS.ctb);
+				if (XQ && idx) {
+					// 有配對嘅站各算一次（無配對嘅站兩家各算一次）
+					const paired = new Set();
+					for (const [kmbId, ctbIds] of idx.fwd) {
+						paired.add('kmb|' + kmbId);
+						for (const c of ctbIds) paired.add('ctb|' + c);
+					}
+					merged = phys - paired.size;   // 每組配對減少 (n) 個重複
+				}
+				const stampTxt = (XQ && idx)
+					? `離線資料：${phys.toLocaleString()} 個車站（跨公司合併後約 ${merged.toLocaleString()} 個站） · ` +
+					  `${DB.routeList.length.toLocaleString()} 條路線 · 更新於 ${DB.updated}`
+					: `離線資料：${phys.toLocaleString()} 個車站 · ${DB.routeList.length.toLocaleString()} 條路線 · 更新於 ${DB.updated}`;
+				$('data-stamp').textContent = stampTxt;
 			} catch (e) {
+				if (gen !== bootGen) return false;   // 過時錯誤唔報
 				console.error('[boot]', e);
 				showSearchError('離線資料載入失敗', `${e.message}。請檢查網絡後重新整理頁面。`);
 				// 資料載入失敗也要清掉 localStorage 區塊（否則會顯示過時的終點名）
 				renderRecent();
-				return;
+				return false;
 			}
 			// renderRecent() 依賴 DB（要查路線終點名），必須等資料載入後才呼叫。
 			// 原本在 try 之前呼叫 → DB 為 null 時 routeDestName() 讀 DB.routeList 會爆。
 			renderRecent();
+			return true;
 		})();
-		return booting;
+		booting = my;
+		// boot() 失敗時唔快取 Promise，容許用戶按「重新載入」再試
+		const r = await my;
+		if (!r) booting = null;
+		return r;
+	}
+
+	/**
+	 * 路線頁使用的離線 store（M9）。
+	 * 路線頁屬單公司（計劃書 XR4），故要按本次路線嘅來源公司取 store，
+	 * 唔可以用偏好公司嘅 DB —— 否則從城巴路線行入嚟會用九巴資料查站序。
+	 */
+	function routeStore() {
+		return (state.route && DBS[state.route.co]) || DB;
 	}
 
 	/* ============ 頁面切換 ============ */
@@ -191,7 +390,7 @@
 			return 5;
 		};
 
-		// 先算最近九巴站距離（rank 依賴 nearest，故必須先計算）
+		// 先算最近該公司車站的距離（rank 依賴 nearest，故必須先計算）
 		if (DB) {
 			for (const c of list) {
 				const near = B.findNearbyStops(DB, c, 500).slice(0, 1)[0];
@@ -204,7 +403,7 @@
 		const items = sorted.map((c, i) => {
 			const meta = [
 				c.type ? typeLabel(c.type) : '',
-				c.nearest != null ? `最近九巴站 ${c.nearest} 米` : '附近未見九巴站'
+				c.nearest != null ? `最近巴士站 ${c.nearest} 米` : '附近未見巴士站'
 			].filter(Boolean).join(' · ');
 			// 同名命中點無法靠名稱分辨 → 用標籤明確指出性質
 			// 完全同名時仍要看類型：「淘大花園」有 residential 與 bus_stop 兩筆同名
@@ -295,18 +494,29 @@
 
 	function renderRecent() {
 		const r = B.store.recent.load();
-		const f = B.store.favorites.load();
-		const fr = B.store.favRoutes.load();
+		// ⚠️ M9：切換器已移除 → 收藏／常搭路線**跨公司顯示**（loadAll），
+		//    否則用戶會以為收藏「消失咗」。資料層仍按 co 隔離（避免 stop ID 撞名），
+		//    顯示時用公司色點標示來源（見 coDot）。
+		const f = B.store.favorites.loadAll();
+		const fr = B.store.favRoutes.loadAll();
 		let html = '';
 
 		// 常搭路線：手動釘選（永在最前）+ 自動統計（未釘選且達門檻者）
+		// ⚠️ pinnedKeys 必須連 co 計：兩家有同號路線（九巴 1 ≠ 城巴 1），
+		//    淨用 route|bound 會令城巴 1 被九巴 1 誤蓋。
 		const pinned = fr.map((x) => ({ ...x, pinned: true }));
-		const pinnedKeys = new Set(fr.map((x) => `${x.r}|${x.b}`));
-		const auto = B.store.routeVisits.top(20)
-			.filter((x) => !pinnedKeys.has(`${x.route}|${x.bound}`))
+		const pinnedKeys = new Set(fr.map((x) => `${x.co || DEFAULT_CO}|${x.r}|${x.b}`));
+		// routeVisits 無 loadAll（key 帶 co 前綴）→ 逐家取再合併
+		const autoAll = [
+			...B.store.routeVisits.top(20, 'kmb').map((x) => ({ ...x, co: 'kmb' })),
+			...B.store.routeVisits.top(20, 'ctb').map((x) => ({ ...x, co: 'ctb' }))
+		].sort((a, b) => b.count - a.count);
+		const auto = autoAll
+			.filter((x) => !pinnedKeys.has(`${x.co}|${x.route}|${x.bound}`))
 			.slice(0, ROUTE_MAX_AUTO)
 			.map((x) => ({
-				r: x.route, b: x.bound, s: null, d: routeDestName(x.route, x.bound),
+				co: x.co, r: x.route, b: x.bound, s: null,
+				d: routeDestName(x.co, x.route, x.bound),
 				count: x.count, pinned: false
 			}));
 		const favRoutes = [...pinned, ...auto];
@@ -331,7 +541,8 @@
 			else if (favTab === 'stop' && !f.length) favTab = 'route';
 
 			const rows = favTab === 'route'
-				? favRoutes.map((x, i) => `<button class="result" data-fr="${i}">
+				? favRoutes.map((x, i) => `<button class="result" data-fr="${i}" data-co="${esc(x.co || DEFAULT_CO)}">
+					${coDot(x.co)}
 					<svg style="width:18px;height:18px;flex-shrink:0;${x.pinned ? 'fill:#f5a623;stroke:#f5a623' : 'fill:none;stroke:var(--text-3);stroke-width:2;stroke-linejoin:round'}"><use href="#i-star"/></svg>
 					<span class="body">
 						<span class="name">${esc(x.r)} <span class="sub2">往 ${esc(x.d || '—')}</span></span>
@@ -343,10 +554,11 @@
 						<svg><use href="#i-x"/></svg>
 					</span>
 				</button>`).join('')
-				: f.map((x) => `<button class="result" data-f="${esc(x.stop)}">
+				: f.map((x) => `<button class="result" data-f="${esc(x.stop)}" data-co="${esc(x.co || DEFAULT_CO)}">
+					${coDot(x.co)}
 					<svg style="width:18px;height:18px;fill:#f5a623;stroke:#f5a623;flex-shrink:0"><use href="#i-star"/></svg>
 					<span class="body"><span class="name">${esc(x.name)}</span></span>
-					<span class="row-del" data-unfav="${esc(x.stop)}" role="button" aria-label="移除 ${esc(x.name)}" title="移除">
+					<span class="row-del" data-unfav="${esc(x.stop)}" data-co="${esc(x.co || DEFAULT_CO)}" role="button" aria-label="移除 ${esc(x.name)}" title="移除">
 						<svg><use href="#i-x"/></svg>
 					</span>
 				</button>`).join('');
@@ -377,11 +589,12 @@
 		$('recent').querySelectorAll('[data-fr]').forEach((b) => b.addEventListener('click', async (e) => {
 			if (e.target.closest('[data-rmroute]')) return;   // 移除鈕已另行處理
 			const x = favRoutes[+b.dataset.fr];
+			const xco = x.co || DEFAULT_CO;
 			boot().then(() => {
-				if (!DB) return;
-				B.store.routeVisits.visit(x.r, x.b);
+				if (!DBS[xco]) return;
+				B.store.routeVisits.visit(xco, x.r, x.b);
 				openRoute({
-					no: x.r, dir: x.b, svc: x.s || 1, dest: x.d || '',
+					no: x.r, dir: x.b, svc: x.s || 1, dest: x.d || '', co: xco,
 					seqs: null,   // 從常搭清單進入無特定出發站 → 只顯示全線站序
 					from: 'recent' // 返回時直接回首頁
 				});
@@ -391,11 +604,12 @@
 		$('recent').querySelectorAll('[data-rmroute]').forEach((b) => b.addEventListener('click', (e) => {
 			e.stopPropagation();
 			const x = favRoutes[+b.dataset.rmroute];
+			const xco = x.co || DEFAULT_CO;
 			if (x.pinned) {
-				B.store.favRoutes.toggle(x.r, x.b, x.s || 1, x.d);
+				B.store.favRoutes.toggle(xco, x.r, x.b, x.s || 1, x.d);
 				toast('已取消常搭');
 			} else {
-				B.store.routeVisits.hide(x.r, x.b);
+				B.store.routeVisits.hide(xco, x.r, x.b);
 				toast('已從常搭路線移除');
 			}
 			renderRecent();
@@ -413,12 +627,14 @@
 		}));
 		$('recent').querySelectorAll('[data-f]').forEach((b) => b.addEventListener('click', (e) => {
 			if (e.target.closest('[data-unfav]')) return;
-			const x = f.find((y) => y.stop === b.dataset.f);
-			if (x) openEta({ stop: x.stop, name: x.name, lat: x.lat, lng: x.lng, from: 'recent' });
+			// ⚠️ 跨公司顯示後，stop ID 可能兩家都有 → 必須連 co 一起比對
+			const bco = b.dataset.co || DEFAULT_CO;
+			const x = f.find((y) => y.stop === b.dataset.f && (y.co || DEFAULT_CO) === bco);
+			if (x) openEta({ stop: x.stop, co: bco, name: x.name, lat: x.lat, lng: x.lng, from: 'recent' });
 		}));
 		$('recent').querySelectorAll('[data-unfav]').forEach((b) => b.addEventListener('click', (e) => {
 			e.stopPropagation();
-			B.store.favorites.toggle({ stop: b.dataset.unfav });
+			B.store.favorites.toggle(b.dataset.co || DEFAULT_CO, { stop: b.dataset.unfav });
 			renderRecent();
 			toast('已移除');
 		}));
@@ -426,11 +642,14 @@
 
 	/**
 	 * 從離線 routeList 取某路線某方向的終點名。
-	 * 必須容忍 DB 尚未載入：boot() 會在載入資料前先 renderRecent() 一次（見下）。
+	 * ⚠️ M9：跨公司顯示後必須傳 co —— 九巴 1（尖沙咀碼頭）與城巴 1（中環）完全不同，
+	 *    用錯 store 會顯示錯終點。
+	 * 必須容忍 store 尚未載入（renderRecent 會喺 boot 完成前先跑一次）。
 	 */
-	function routeDestName(routeNo, bound) {
-		if (!DB || !DB.routeList) return '';
-		for (const [no, b, , dest] of DB.routeList) {
+	function routeDestName(co, routeNo, bound) {
+		const store = DBS[co || DEFAULT_CO] || DB;
+		if (!store || !store.routeList) return '';
+		for (const [no, b, , dest] of store.routeList) {
 			if (no === routeNo && b === bound) return dest;
 		}
 		return '';
@@ -438,10 +657,11 @@
 
 	$('clear-data').addEventListener('click', () => {
 		const nR = B.store.recent.load().length;
-		const nF = B.store.favorites.load().length;
-		const nPinned = B.store.favRoutes.load().length;
-		const nAuto = B.store.routeVisits.top(20).length;
-		const nGeo = JSON.parse(localStorage.getItem('buseta.geoCache') || '[]').length;
+		// 清除本機資料係**全裝置**操作（唔分邊間公司），故用loadAll()
+		const nF = B.store.favorites.loadAll().length;
+		const nPinned = B.store.favRoutes.loadAll().length;
+		const nAuto = B.store.routeVisits.top(20, DEFAULT_CO).length +
+			B.store.routeVisits.top(20, 'ctb').length;		const nGeo = JSON.parse(localStorage.getItem('buseta.geoCache') || '[]').length;
 		if (!confirm(
 			'確定清除此裝置上的所有資料？\n\n' +
 			`· 最近搜尋（${nR} 項）\n` +
@@ -480,57 +700,166 @@
 		renderNearby();
 	}
 
+	/**
+	 * 附近站（跨公司合併版，M9）。
+	 *
+	 * M9 目標：一次過列出**兩家公司**的站，並把確認同一物理站的合併成一項，
+	 * 用戶唔使切換公司。維景酒店會由「九巴一項 + 城巴一項」變成「一項」。
+	 *
+	 * 分組用 union-find，兩種關係都要顧（實測踩坑兩次先啱，記低）：
+	 *   · cross 配對：兩家 stop ID 不同、站名格式亦不同
+	 *     （KC674「何文田街 (KC674)」↔ 城巴 001627「何文田街, 窩打老道」）
+	 *     —— 靠 groupKey 永遠合併唔到。
+	 *   · 同名行車位：同公司多個 stop ID 共用站名（KC331/KC332 同為「勝利道」）
+	 *     —— 靠 cross 永遠合併唔到。
+	 *
+	 * ⚠️ 兩者**唔可以用二選一或者 `cluster + groupKey` 複合鍵**：
+	 *    咁樣樣配對站因 groupKey 不同而永遠唔會同組（實測踩過，跨公司合併完全失效）。
+	 * 正解：先按 cross union 成簇，再把「同 groupKey 且地理相鄰（≤120m）」的簇 union 起來。
+	 * 加距離條件係必需：兩個唔同地點可以有同名站（「香港站」港鐵同機場都有）。
+	 */
 	function renderNearby() {
 		const { place, radius } = state;
 		const t0 = performance.now();
-		// 純記憶體計算，零網絡請求（規劃書 §4.3）
-		const list = B.findNearbyStops(DB, place, radius);
-		state.nearby = list;
+
+		// 1. 兩家都查（純記憶體，零網絡請求）
+		const list = [];
+		for (const co of Object.keys(DBS)) {
+			for (const s of B.findNearbyStops(DBS[co], place, radius)) {
+				list.push({ ...s, co });
+			}
+		}
 		const ms = Math.round(performance.now() - t0);
+		state.nearby = list;
+
+		// 2. union-find
+		const parent = new Map();
+		const find = (x) => {
+			while (parent.get(x) !== x) {
+				parent.set(x, parent.get(parent.get(x)));   // 路徑壓縮
+				x = parent.get(x);
+			}
+			return x;
+		};
+		const union = (a, b) => {
+			const ra = find(a), rb = find(b);
+			if (ra === rb) return;
+			// ⚠️ 決定性：把小 id 掛到大事實下（唔依插入次序）
+			if (ra < rb) parent.set(rb, ra); else parent.set(ra, rb);
+		};
+		const keyOf = (s) => `${s.co}|${s.stop}`;
+		for (const s of list) if (!parent.has(keyOf(s))) parent.set(keyOf(s), keyOf(s));
+
+		// 2a. cross 配對union（一對多自然全部連埋）
+		if (XQ) {
+			for (const s of list) {
+				for (const m of XQ.group(s.co, s.stop)) {
+					const mk = `${m.co}|${m.stop}`;
+					if (!parent.has(mk)) parent.set(mk, mk);
+					union(keyOf(s), mk);
+				}
+			}
+		}
+
+		// 2b. 同名行車位union（同 groupKey 且相鄰）
+		{
+			const snap = () => {
+				const m = new Map();
+				for (const s of list) {
+					const c = find(keyOf(s));
+					if (!m.has(c)) m.set(c, []);
+					m.get(c).push(s);
+				}
+				return m;
+			};
+			const byCluster = snap();
+			const byName = new Map();     // groupKey → Set(cluster)
+			for (const [c, mem] of byCluster) {
+				for (const s of mem) {
+					const gk = B.groupKey(s.name);
+					if (!byName.has(gk)) byName.set(gk, new Set());
+					byName.get(gk).add(c);
+				}
+			}
+			for (const clusters of byName.values()) {
+				const arr = [...clusters];
+				for (let i = 0; i < arr.length; i++) {
+					for (let j = i + 1; j < arr.length; j++) {
+						const A = byCluster.get(arr[i]) || [];
+						const C = byCluster.get(arr[j]) || [];
+						let close = false;
+						for (const a of A) {
+							for (const b of C) {
+								if (B.haversine(a.lat, a.lng, b.lat, b.lng) <= 120) { close = true; break; }
+							}
+							if (close) break;
+						}
+						if (close) { union(arr[i], arr[j]); break; }
+					}
+				}
+			}
+		}
+
+		// 2c. 收集最終分組
+		const groups = new Map();
+		for (const s of list) {
+			const c = find(keyOf(s));
+			if (!groups.has(c)) groups.set(c, []);
+			groups.get(c).push(s);
+		}
+		const merged = [...groups.values()];
 
 		$('nb-count').innerHTML = list.length
-			? `範圍內 <span class="count">${list.length} 個站</span> · ${ms} 毫秒`
+			? `範圍內 <span class="count">${list.length} 個站</span>` +
+			  (XQ ? `（合併後 ${merged.length} 個）` : '') + ` · ${ms} 毫秒`
 			: '';
 
-		// 地圖已開啟時同步重繪（範圍圓圈 + marker 密度）
+		// 地圖已開啟時同步重繪
 		if (map && $('map').classList.contains('on')) {
 			map.setView([place.lat, place.lng], 16);
 			renderMapLayers();
 		}
 
 		if (!list.length) {
-			$('nb-list').innerHTML = emptyBox('此範圍內未有九巴／龍運巴士站',
-				'可嘗試擴大搜尋範圍。此站可能只有城巴或新巴路線，本 app 暫未涵蓋。');
+			$('nb-list').innerHTML = emptyBox(
+				XQ ? '此範圍內未有巴士站' : `此範圍內未有${brand().label}巴士站`,
+				'可嘗試擴大搜尋範圍。');
 			return;
 		}
 
-		// 合併同名站（實測「太古城中心」有 6 個獨立 stop ID；
-		// 「黃大仙轉車站-黃大仙廟 (WT718)」等需剝除括號編碼才合併得對）
-		const groups = new Map();
-		for (const s of list) {
-			const k = B.groupKey(s.name);
-			let g = groups.get(k);
-			if (!g) groups.set(k, (g = []));
-			g.push(s);
-		}
+		// 3. 渲染（顯示名優先用偏好公司嘅名，用戶最熟悉嗰個）
+		const rows = merged.map((members) => {
+			members.sort((a, b) => a.distance - b.distance);
+			const nearest = members[0];
+			const primary = members.find((s) => s.co === adapter.id) || nearest;
+			const posCount = new Set(members.map((s) => B.groupKey(s.name))).size;
+			const cos = [...new Set(members.map((s) => s.co))];
 
-		const rows = [...groups.values()].map((grp) => {
-			grp.sort((a, b) => a.distance - b.distance);
-			const nearest = grp[0];
-			const stopIds = grp.map((s) => s.stop);
-			const routes = new Set();
-			for (const id of stopIds) for (const r of B.getStopRoutes(DB, id)) routes.add(r.route);
-			const rl = [...routes].sort((a, b) => a.localeCompare(b, 'en', { numeric: true }));
-			const chips = rl.slice(0, 6).map((r) => `<span class="chip">${esc(r)}</span>`).join('') +
-				(rl.length > 6 ? `<span class="chip more">+${rl.length - 6}</span>` : '');
-			// 保留原始名（含分站編碼）作顯示，並標明共幾個站
-			const displayName = nearest.name;
+			// 路線：合併全組所有 stop 的路線（跨公司）
+			const routes = new Map();      // route → Set(co)
+			for (const s of members) {
+				const store = DBS[s.co];
+				if (!store) continue;
+				for (const r of B.getStopRoutes(store, s.stop)) {
+					if (!routes.has(r.route)) routes.set(r.route, new Set());
+					routes.get(r.route).add(s.co);
+				}
+			}
+			const rl = [...routes.keys()].sort((a, b) => a.localeCompare(b, 'en', { numeric: true }));
+			const chips = rl.slice(0, 6).map((r) =>
+				`<span class="chip${routes.get(r).size > 1 ? ' both' : ''}">${esc(r)}</span>`
+			).join('') + (rl.length > 6 ? `<span class="chip more">+${rl.length - 6}</span>` : '');
 
-			return `<button class="stop" data-ids="${esc(stopIds.join(','))}">
+			const ids = members.map((s) => ({ co: s.co, stop: s.stop }));
+			const tags = [];
+			if (cos.length > 1) tags.push('<span class="tag">兩家巴士公司</span>');
+			if (posCount > 1) tags.push(`<span class="tag gray">${posCount} 個行車位</span>`);
+
+			return `<button class="stop" data-ids="${esc(JSON.stringify(ids))}">
 				<span class="body">
 					<span class="name">
-						<span class="txt">${esc(displayName)}</span>
-						${grp.length > 1 ? `<span class="tag gray">${grp.length} 個行車位</span>` : ''}
+						<span class="txt">${esc(primary.name)}</span>
+						${tags.join('')}
 					</span>
 					<span class="meta">
 						<span class="dist ${nearest.distance < 150 ? 'near' : nearest.distance < 300 ? 'mid' : 'far'}">${nearest.distance}</span>
@@ -545,9 +874,18 @@
 		$('nb-list').innerHTML = `<div class="card" style="margin:0 14px 20px">${rows}</div>`;
 
 		$('nb-list').querySelectorAll('.stop').forEach((b) => b.addEventListener('click', () => {
-			const ids = b.dataset.ids.split(',');
-			const first = state.nearby.find((s) => s.stop === ids[0]);
-			openEta({ stop: first.stop, name: first.name, lat: first.lat, lng: first.lng, ids, distance: first.distance });
+			// data-ids 係 JSON 陣列 [{co, stop}]；舊格式（逗號分隔字串）向後兼容
+			let ids;
+			try {
+				ids = JSON.parse(b.dataset.ids);
+			} catch {
+				ids = b.dataset.ids.split(',').map((s) => ({ co: adapter.id, stop: s }));
+			}
+			const first = state.nearby.find((s) => s.stop === ids[0].stop && s.co === ids[0].co) || state.nearby[0];
+			openEta({
+				stop: first.stop, co: first.co, name: first.name,
+				lat: first.lat, lng: first.lng, ids, distance: first.distance
+			});
 		}));
 	}
 
@@ -597,11 +935,23 @@
 		fetchEta();
 	}
 
+	/**
+	 * 把 state.stop.ids 統一成 `[{co, stop}]` 形狀。
+	 * 兼容舊格式（字串陣列）→ 當作偏好公司。
+	 */
+	function normalizeStopIds(stop) {
+		if (Array.isArray(stop.ids) && stop.ids.length) {
+			return stop.ids.map((x) =>
+				(typeof x === 'string' ? { co: stop.co || adapter.id, stop: x } : x));
+		}
+		return [{ co: stop.co || adapter.id, stop: stop.stop }];
+	}
+
 	/** 同步 ETA 頁「常到車站」星號狀態（啟動原本只有資料層、UI 無入口的功能） */
 	function syncFavBtn() {
 		const s = state.stop;
 		if (!s) return;
-		const on = B.store.favorites.has(s.stop);
+		const on = B.store.favorites.has(s.co || adapter.id, s.stop);
 		$('eta-fav').classList.toggle('on', on);
 		$('eta-fav').setAttribute('aria-label', on ? '取消常到車站' : '加入常到車站');
 	}
@@ -609,9 +959,10 @@
 	$('eta-fav').addEventListener('click', () => {
 		const s = state.stop;
 		if (!s) return;
-		B.store.favorites.toggle({ stop: s.stop, name: s.name, lat: s.lat, lng: s.lng });
+		const co = s.co || adapter.id;
+		B.store.favorites.toggle(co, { stop: s.stop, name: s.name, lat: s.lat, lng: s.lng });
 		syncFavBtn();
-		toast(B.store.favorites.has(s.stop) ? '已加入常到車站' : '已移除');
+		toast(B.store.favorites.has(co, s.stop) ? '已加入常到車站' : '已移除');
 		renderRecent();
 	});
 
@@ -628,17 +979,22 @@
 
 		try {
 			// 合併站可能對應多個 stop ID（實測「太古城中心」有 6 個）→ 全部查詢後合併
-			const ids = state.stop.ids || [state.stop.stop];
+			// ⚠️ M9：每個 stop 要用**自己公司**的 adapter 查（城巴站唔可以用九巴 API）
+			const ids = normalizeStopIds(state.stop);
 			const results = await Promise.all(
-				ids.map((id) => adapter.fetchStopEta(id, ac.signal).catch((e) => {
-					if (e.name === 'AbortError') throw e;
-					return [];   // 單一 stop 失敗不影響整組
-				}))
+				ids.map((id) => {
+					const a = B.getAdapter(id.co) || adapter;
+					return a.fetchStopEta(id.stop, ac.signal).catch((e) => {
+						if (e.name === 'AbortError') throw e;
+						return [];   // 單一 stop 失敗不影響整組
+					});
+				})
 			);
 			// 若本輪已被新一輪取代，丟棄結果
 			if (token !== state.etaToken) return;
-			// 標記每筆 ETA 所屬的 stop ID 以便去重
-			const tagged = results.flatMap((rows, i) => rows.map((r) => ({ ...r, _stop: ids[i] })));
+			// 標記每筆ETA 所屬的 stop ID（連公司）以便去重同顯示色點
+			const tagged = results.flatMap((rows, i) =>
+				rows.map((r) => ({ ...r, _stop: ids[i].stop, _co: ids[i].co })));
 			state.eta = B.normalizeEta(tagged);
 			state.lastFetch = Date.now();
 			renderEta();
@@ -662,8 +1018,8 @@
 		stopPolling();
 		state.timer = setInterval(() => {
 			// 輪詢條件（規劃書 §5.4）：頁面可見 + 未暫停 + 距上次 ≥15s
-			if (document.visibilityState === 'visible' && Date.now() - state.lastFetch >= POLL_MS) fetchEta();
-		}, POLL_MS);
+			if (document.visibilityState === 'visible' && Date.now() - state.lastFetch >= pollMs()) fetchEta();
+		}, pollMs());
 		state.tickTimer = setInterval(tickCountdown, 1000);
 	}
 
@@ -692,23 +1048,33 @@
 		const list = state.eta;
 		if (!list.length) {
 			$('eta-list').innerHTML = emptyBox('此站暫時冇到站預報',
-				'可能不在服務時間內，或該站只有間歇服務。九巴／龍運的行車時間表可參考官方網站。');
-			$('eta-status').textContent = '每 15 秒更新';
+				'可能不在服務時間內，或該站只有間歇服務。九巴／龍運及城巴／新巴的行車時間表可參考官方網站。');
+			$('eta-status').textContent = `每 ${pollMs() / 1000} 秒更新`;
 			$('eta-stamp').textContent = '';
 			return;
 		}
 
-		// 二級合併：同一路線 + 方向只顯示一行
+		// 二級合併：同一路線 + **正規化方向** 只顯示一行
 		//
 		// 背景：合併站含多個 stop ID（實測「黃大仙轉車站」5 個），
 		// 同一路線會喺每個行車位各回一組 ETA（終點名略有差異），
 		// 若照 stop 分行會出現 3-4 行「268C」令用戶困惑。
-		// 正確做法：按 dir|route|svc 合併，把所有行車位的 ETA 依時間排序取最前 3 班。
+		//
+		// ⚠️ M9：key 要用「正規化方向」而唔係原始 dir。
+		//   實測路線 103：九巴 I→竹園邨、城巴 O→竹園 —— 字母相反但同一方向。
+		//   若按原始 dir 分組會顯示成兩行，用戶會誤以為係兩條線。
+		//   對應表來自 build 時預計算（cross.dirs），因實測無全域規律。
+		const cIdx = DBS.ctb ? B.crossIndex(DBS.ctb) : null;
 		const byRoute = new Map();
 		for (const o of list) {
-			// 不含 svc：官方 ETA 會跨 service_type 混入同一批班次
+			// 不含 svc：官方 ETA 會跨service_type 混入同一批班次
 			// （規劃書 §2.3陷阱二），若含 svc 會把同路線拆成多行
-			const key = `${o.dir}|${o.route}`;
+			// ⚠️ M9：含 co —— 兩家同路線同方向必須合併（顯示為一行，色點標示來源）
+			const nd = cIdx ? B.normalizeDir(cIdx, o.route, o.dir, o.co) : { key: o.dir, dir: o.dir };
+			const key = `${nd.key}|${o.route}`;
+			// ⚠️ 直接掛 _dir 落原物件（唔好 spread 造新物件）——
+			//    下面 data-etas 用 list.indexOf(o) 索引，spread 會令 indexOf 全部 -1。
+			o._dir = nd.key;
 			if (!byRoute.has(key)) byRoute.set(key, []);
 			byRoute.get(key).push(o);
 		}
@@ -723,17 +1089,30 @@
 				return a.ts - b.ts;
 			});
 			// 同時間戳去重（多個行車位可能回同一班車）
+			//
+			// ⚠️ M9 修正（2026-10-09）：原邏輯收集到 3 個「有時間」的 ETA 就 break。
+			//    但合併行可能係「城巴有班次 + 九巴無預報（ts=null）」——
+			//    九巴嗰行會永遠收唔到，導致色點只顯示一間公司（迴歸：用戶見到 103 只有一粒色點）。
+			//    修正：每家公司**至少保留一行**，令色點正確反映兩家都有服務。
 			const uniq = [];
 			const seenTs = new Set();
+			const seenCo = new Set();
 			for (const o of arr) {
 				const k = o.ts === null ? `null${o.rmk}` : String(o.ts);
 				if (seenTs.has(k)) continue;
 				seenTs.add(k);
 				uniq.push(o);
-				if (uniq.filter((x) => x.ts !== null).length >= 3 && uniq.length >= 3) break;
+				// 每家至少一行（用嚟保留公司色點），否則該家會被完全隱形
+				if (o.co) seenCo.add(o.co);
+				// 收集夠 3 個有時間的 ETA **且** 每家都至少有一行 → 可以停
+				const timedCount = uniq.filter((x) => x.ts !== null).length;
+				const cosInGroup = new Set(arr.map((x) => x.co).filter(Boolean));
+				if (timedCount >= 3 && cosInGroup.size > 0 &&
+					[...cosInGroup].every((c) => seenCo.has(c))) break;
 			}
 			const g = uniq.length ? uniq : arr.slice(0, 3);
-			(arr[0].dir === 'I' ? I : O).push(g);
+			// ⚠️ M9：用正規化方向分區（否則跨公司同一方向會被分到兩區）
+			(arr[0]._dir === 'I' ? I : O).push(g);
 		}
 
 		// 組內按最近一班 ETA 時間排序（用戶習慣由早到遲）
@@ -753,7 +1132,6 @@
 				const destCount = new Map();
 				for (const o of g) if (o.dest) destCount.set(o.dest, (destCount.get(o.dest) || 0) + 1);
 				const dest = [...destCount.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || '';
-				const svc = g[0].svc;
 				const svcCount = new Map();
 				for (const o of g) svcCount.set(o.svc, (svcCount.get(o.svc) || 0) + 1);
 				const mainSvc = [...svcCount.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
@@ -768,11 +1146,27 @@
 				}).join('');
 				// data-r 帶齊路線／方向／svc／該行全部 seq 與 stop ID 給路線頁用
 				const stopIds = [...new Set(g.map((o) => o.stop).filter(Boolean))];
-				return `<button class="eta-row" data-ids="${esc(g.map((o) => o.seq).join(','))}"
+				// ⚠️ M9：公司色點 —— 該行由邊家提供。若兩家都有，顯示兩粒。
+				//    因同一路線同一方向已合併成一行，用戶需要知道班次來自九巴定城巴。
+				//
+				// ⚠️ 色點**唔論有冇 ETA 都要顯示**（2026-10-09 用戶回報後檢視）：
+				//    原本以為「無 ETA 的行無色點」，實測發現全部行都有色點；
+				//    但同一站通常只屬一家 → 全部都係同一粒紅點，對「有冇預報」毫無區分作用。
+				//    故色點回歸「公司識別」單一語義；「有冇預報」改用整行淡化（no-eta class）表達。
+				const cos = [...new Set(g.map((o) => o.co).filter(Boolean))];
+				// 該行是否完全無預報（所有 ETA 的 ts 都係 null）→ 整行淡化
+				const noEta = g.every((o) => o.ts === null);
+				const dots = XQ && cos.length
+					? `<span class="co-dots">${cos.map((c) =>
+						`<i class="co-dot ${esc(c)}" title="${esc(B.getAdapter(c).label)}"></i>`).join('')}</span>`
+					: '';
+				const cosAttr = XQ ? ` data-cos="${esc(cos.join(','))}"` : '';
+				return `<button class="eta-row${noEta ? ' no-eta' : ''}" data-ids="${esc(g.map((o) => o.seq).join(','))}"
 					data-stops="${esc(stopIds.join(','))}"
-					data-r="${esc(g[0].route)}" data-dir="${esc(g[0].dir)}"
-					data-svc="${esc(mainSvc == null ? 1 : mainSvc)}" data-dest="${esc(dest)}">
-					<span class="route-no">${esc(g[0].route)}</span>
+					data-r="${esc(g[0].route)}" data-dir="${esc(g[0].dir)}" data-ndir="${esc(g[0]._dir || g[0].dir)}"
+					data-co="${esc(cos[0] || '')}"
+					data-svc="${esc(mainSvc == null ? 1 : mainSvc)}" data-dest="${esc(dest)}"${cosAttr}>
+					<span class="route-no">${dots}${esc(g[0].route)}</span>
 					<span class="dest">${esc(dest)}${svcTag}${multiTag}</span>
 					<span class="eta-list">${etas}</span>
 				</button>`;
@@ -784,7 +1178,7 @@
 			block('<span class="arrow">←</span> 往總站方向', I) +
 			block('<span class="arrow">→</span> 開往終點', O);
 
-		$('eta-status').textContent = `每 ${POLL_MS / 1000} 秒更新`;
+		$('eta-status').textContent = `每 ${pollMs() / 1000} 秒更新`;
 		const stamp = list.find((o) => o.dataTs);
 		$('eta-stamp').textContent = stamp ? `資料時間 ${stamp.dataTs.slice(11, 16)}` : '';
 
@@ -797,11 +1191,17 @@
 		// 路線行可點 → 進路線詳情頁（.eta-row 本來就是 button，零 UI 改動）
 		$('eta-list').querySelectorAll('.eta-row').forEach((b) => {
 			b.addEventListener('click', () => {
+				// ⚠️ M9：合併行可能來自兩家（data-cos），路線頁仍屬單公司（M9 範圍外，
+				//    見計劃書 XR4）→ 用**第一個來源公司**的 store 查站序。
+				//    dir 必須用**原始**字母（g[0].dir），唔可以用 normalizeDir 嘅結果 ——
+				//    後者係合併鍵（無對應表時會變成 "kmb|I"），唔係真實方向。
+				const co = (b.dataset.cos || '').split(',').filter(Boolean)[0] || adapter.id;
 				openRoute({
 					no: b.dataset.r,
 					dir: b.dataset.dir,
 					svc: +b.dataset.svc || 1,
 					dest: b.dataset.dest,
+					co,
 					seqs: b.dataset.ids.split(',').map(Number).filter((n) => !isNaN(n)),
 					// 合併站會帶多個 stop ID（實測「黃大仙中心」同站最多 6 個行車位）
 					stopIds: (b.dataset.stops || '').split(',').filter(Boolean)
@@ -836,7 +1236,7 @@
 	$('rt-fav').addEventListener('click', () => {
 		const r = state.route;
 		if (!r) return;
-		const on = B.store.favRoutes.toggle(r.no, r.bound, r.svc, r.dest);
+		const on = B.store.favRoutes.toggle(r.co || adapter.id, r.no, r.bound, r.svc, r.dest);
 		syncRouteFavBtn();
 		toast(on ? '已加入常搭路線' : '已移除');
 		renderRecent();
@@ -845,7 +1245,7 @@
 	function syncRouteFavBtn() {
 		const r = state.route;
 		if (!r) return;
-		const on = B.store.favRoutes.has(r.no, r.bound, r.svc);
+		const on = B.store.favRoutes.has(r.co || adapter.id, r.no, r.bound, r.svc);
 		$('rt-fav').classList.toggle('on', on);
 		$('rt-fav').setAttribute('aria-label', on ? '取消常搭路線' : '加入常搭路線');
 	}
@@ -857,7 +1257,11 @@
 	 */
 	function openRoute(opts) {
 		boot().then(() => {
-		if (!DB) return;
+		// ⚠️ M9：路線頁屬單公司（計劃書 XR4，跨公司路線頁留待下階段）。
+		//    故記低本次路線屬邊家，頁內所有離線查詢都用該家嘅 store。
+		const rco = opts.co || adapter.id;
+		const rstore = DBS[rco] || DB;
+		if (!rstore) return;
 		stopPolling();
 		stopRoutePolling();
 
@@ -866,11 +1270,11 @@
 		state.routeEta = [];
 		// 記錄來源，供返回按鈕決定目標（從常搭路線進入 → 返回首頁）
 		state.routeFrom = opts.from === 'recent' ? 'recent' : null;
-		state.route = { no: opts.no, bound: opts.dir, svc: opts.svc, dest: opts.dest };
+		state.route = { no: opts.no, bound: opts.dir, svc: opts.svc, dest: opts.dest, co: rco };
 
 		// 自動訪問統計：首次不計（視為試用），第二次起才累加
 		// v.hidden = 用戶曾手動移除此路線 → 不顯示任何提示
-		const v = B.store.routeVisits.visit(opts.no, opts.dir);
+		const v = B.store.routeVisits.visit(rco, opts.no, opts.dir);
 
 		$('rt-no').textContent = opts.no;
 		$('rt-sub').textContent = '';
@@ -887,9 +1291,10 @@
 	/** 方向分頁：列出該路線號所有方向的終點名 */
 	function buildDirTabs(routeNo, activeDir, svc) {
 		const box = $('rt-dirs');
+		const store = routeStore();
 		const dirs = new Map();
-		for (let i = 0; i < DB.routeList.length; i++) {
-			const [no, bound, s, dest] = DB.routeList[i];
+		for (let i = 0; i < store.routeList.length; i++) {
+			const [no, bound, s, dest] = store.routeList[i];
 			if (no !== routeNo) continue;
 			// 同一方向多 svc 時，優先用傳入的 svc，否則取第一個
 			const cur = dirs.get(bound);
@@ -920,7 +1325,7 @@ function setRouteDir(dir, svc, ctx, hint) {
 		$('rt-dirs').querySelectorAll('button').forEach((b) => b.classList.toggle('on', b.dataset.d === dir));
 
 		// resolveRouteSeq 內建 svc fallback：原值 → 1 → 同方向任一變體
-		const res = B.resolveRouteSeq(DB, state.route.no, dir, svc);
+		const res = B.resolveRouteSeq(routeStore(), state.route.no, dir, svc);
 		if (!res || !res.stops.length) {
 			$('rt-list').innerHTML = emptyBox('離線資料未有這條路線的站序',
 				'官方每日 05:00 更新路線資料，請稍後再試或重新整理頁面。');
@@ -929,7 +1334,7 @@ function setRouteDir(dir, svc, ctx, hint) {
 		}
 		state.routeStops = res.stops;
 
-		const meta = DB.routeList[res.idx];
+		const meta = routeStore().routeList[res.idx];
 		state.route.dest = meta[3];
 		state.route.svc = meta[2];
 		$('rt-dest').textContent = `往 ${meta[3]}`;
@@ -1112,7 +1517,9 @@ function setRouteDir(dir, svc, ctx, hint) {
 		const sel = state.routeSel;
 		const r = state.route;
 		if (!sel || !r) return;
-		if (typeof adapter.fetchSingleStopEta !== 'function') {
+		// ⚠️ M9：要用**路線所屬公司**的 adapter 查單站 ETA（唔係偏好公司）
+		const rAdapter = B.getAdapter(r.co) || adapter;
+		if (typeof rAdapter.fetchSingleStopEta !== 'function') {
 			showHint('此營辦商未支援單站路線 ETA（離線站序仍可用）');
 			$('rt-status').textContent = '';
 			return;
@@ -1129,7 +1536,7 @@ function setRouteDir(dir, svc, ctx, hint) {
 		renderSeqEtaBox('load');
 
 		try {
-			const rows = await adapter.fetchSingleStopEta(sel.stop, r.no, r.svc, ac.signal);
+			const rows = await rAdapter.fetchSingleStopEta(sel.stop, r.no, r.svc, ac.signal);
 			if (token !== state.routeToken) return;
 			// 按 (dir, seq) 過濾：同一物理 stop 可能同時是該路線 O 與 I 方向的站
 			// 實測 /eta/竹園邨總站/1/1 → O seq 1 + I seq 25 各 3 班
@@ -1180,7 +1587,7 @@ function setRouteDir(dir, svc, ctx, hint) {
 			box.innerHTML = `<span class="lb">到站時間</span>` +
 				(etas ? `<span class="eta-list">${etas}</span>`
 				      : `<span class="none">${navigator.onLine ? '此站暫時冇到站預報' : '離線中，無法顯示實時到站時間'}</span>`);
-			$('rt-status').textContent = `每 ${POLL_MS / 1000} 秒更新`;
+			$('rt-status').textContent = `每 ${pollMs() / 1000} 秒更新`;
 			$('rt-stamp').textContent = stamp ? `資料時間 ${stamp.dataTs.slice(11, 16)}` : '';
 		}
 		row.after(box);
@@ -1204,8 +1611,8 @@ function setRouteDir(dir, svc, ctx, hint) {
 		stopRoutePolling();
 		state.routeTimer = setInterval(() => {
 			if (document.visibilityState === 'visible' && state.routeSel &&
-				Date.now() - state.routeLastFetch >= POLL_MS) fetchRouteStopEta();
-		}, POLL_MS);
+				Date.now() - state.routeLastFetch >= pollMs()) fetchRouteStopEta();
+		}, pollMs());
 		state.routeTick = setInterval(tickRouteCountdown, 1000);
 	}
 
@@ -1345,15 +1752,19 @@ $('map-close').addEventListener('click', () => $('map').classList.remove('on'));
 	// 背景時暫停輪詢（規劃書 §4.4）
 	document.addEventListener('visibilitychange', () => {
 		if (document.visibilityState !== 'visible') return;
-		if (onPage('eta') && Date.now() - state.lastFetch >= POLL_MS) fetchEta();
+		if (onPage('eta') && Date.now() - state.lastFetch >= pollMs()) fetchEta();
 		// 路線頁只在有選中站時輪詢（選中站為 null 時沒有可查的資料）
-		if (onPage('route') && state.routeSel && Date.now() - state.routeLastFetch >= POLL_MS) fetchRouteStopEta();
+		if (onPage('route') && state.routeSel && Date.now() - state.routeLastFetch >= pollMs()) fetchRouteStopEta();
 	});
 
 	/* Service Worker（規劃書 §5.5） */
 	if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
 		addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch((e) => console.warn('[sw]', e)));
 	}
+
+	// 主題色必須喺 boot() 之前套用，否則首屏會有一瞬間嘅預設色閃爍。
+	// ⚠️ M9：公司切換器已移除（合併顯示兩家後，切換已無實質作用）
+	applyBranding();
 
 	boot();
 })();

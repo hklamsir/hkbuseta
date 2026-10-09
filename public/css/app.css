@@ -224,6 +224,28 @@ body {
 	gap: 10px;
 }
 .range-seg { display: flex; background: var(--bg); border-radius: 8px; padding: 2px; flex: 1; }
+
+/* ── M9 跨公司合併 ── */
+
+/* ETA 行的公司色點：同一路線同一方向已合併成一行，
+   用色點告訴用戶班次來自邊家（若兩家都有則顯示兩粒）。 */
+.co-dots { display: inline-flex; gap: 3px; margin-right: 5px; vertical-align: middle; }
+.co-dot {
+	display: inline-block;
+	width: 6px; height: 6px;
+	border-radius: 50%;
+	flex-shrink: 0;
+}
+.co-dot.kmb { background: #b3121b; }   /* 九巴紅 */
+.co-dot.ctb { background: #a8790a; }   /* 城巴琥珀（與 app 主題色一致） */
+
+/* 附近站 chip 的「兩家都有」樣式 */
+.chip.both {
+	background: var(--brand-soft);
+	color: var(--brand);
+	font-weight: 500;
+}
+
 .range-seg button {
 	flex: 1;
 	border: 0;
@@ -412,6 +434,19 @@ body {
 	white-space: nowrap;
 }
 .eta-list { display: flex; gap: 8px; flex-shrink: 0; }
+
+/* 無預報的行（暫時冇預報 / 今日非服務日）
+   ⚠️ 為何唔用色點表達：同一站通常只屬一家 → 全部行都係同一粒色點，
+   毫無區分作用（M9 後的實測發現）。故色點回歸「公司識別」單一語義，
+   「有冇預報」改用整行淡化表達，令用戶一眼掃得出邊啲線有班次。 */
+.eta-row.no-eta .route-no,
+.eta-row.no-eta .dest {
+	opacity: .45;
+}
+.eta-row.no-eta .eta .t {
+	color: var(--muted);
+	font-weight: 400;
+}
 
 .eta {
 	text-align: right;

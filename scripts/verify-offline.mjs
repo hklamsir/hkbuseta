@@ -91,7 +91,9 @@ ok(loaded, '離線下 App Shell + 離線資料載入成功');
 
 if (loaded) {
 	const stamp = await page.textContent('#data-stamp');
-	ok(/6,753/.test(stamp), '車站資料離線可用', stamp.trim());
+	// ⚠️ 唔寫死車站數（官方資料每日更新）——離線下真正要驗證嘅係「離線 gz 成功載入並解析」
+	const nStops = Number(stamp.match(/([\d,]+) 個車站/)?.[1].replace(/,/g, '') || 0);
+	ok(nStops > 6000, '車站資料離線可用', stamp.trim());
 
 	// 離線下用歷史記錄查附近站
 	await page.click('.result[data-r]');

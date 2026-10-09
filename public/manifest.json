@@ -1,7 +1,7 @@
 {
   "name": "BusETA — 巴士到站時間",
   "short_name": "BusETA",
-  "description": "輸入地標，尋找附近九巴及龍運巴士站與實時到站時間",
+  "description": "輸入地標，尋找附近巴士站與實時到站時間，覆蓋九巴及龍運、城巴及新巴",
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",

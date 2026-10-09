@@ -25,7 +25,7 @@
 
 | 不做 | 原因 |
 |---|---|
-| 城巴／新巴／龍運以外的營辦商 ETA | 資料源不同、要處理多套 stop ID 對齊。**但資料層預留 adapter 接口**（見 §6.2） |
+| 城巴／新巴／龍運以外的營辦商 ETA | 資料源不同、要處理多套 stop ID 對齊。**已實作 KMB + CTB 兩個 adapter**（見 §5.7.1）；`registerAdapter` 新增 adapter 即可，UI 與搜尋邏輯唔使改 |
 | 實時 GPS 追蹤巴士位置 | 九巴 API 無此能力 |
 | 路線規劃（邊條路最快、轉車） | 需要圖路由／圖搜尋引擎，遠超本 app 範圍 |
 | 到站提醒／推播通知 | 需要 Service Worker 背景推送 + 後端，違反純前端定位 |
@@ -485,7 +485,45 @@ const TransportAdapters = {
 const activeAdapter = TransportAdapters.kmb;
 ```
 
-**關鍵**：`stops` / `routeStops` 索引結構對所有營辦商一致（都用 16 字符 stop ID + lat/lng），所以核心 UI 與搜尋邏輯**完全唔使改**，只需新增 adapter 同處理多營辦商 stop ID 對齊（同一物理站可能有九巴同城巴兩個 ID）。
+**關鍵**：`stops` / `routeStops` 索引結構對所有營辦商一致，所以核心 UI 與搜尋邏輯**完全唔使改**。
+
+---
+
+### 5.7.1 CTB adapter — 已實作（M8，2026-10-09）
+
+城巴及新巴 adapter 已完成並通過 183 項自動驗證（`node scripts/verify.mjs`）。
+**2023 年專營權合併後，前新巴士路線已併入 `company_id = "CTB"**，故一個 CTB adapter 同時覆蓋城巴 + 新巴。
+
+**與原設計的兩處修正**（實測後改）：
+
+1. **`fetchRouteEta` 由必填降級為 optional**。原介面要求每個 adapter 必實作，但：CTB 根本冇全線端點；且實測 `app.js` 由頭到尾冇呼叫過此方法（死介面）。若維持必填，CTB 註冊時即 throw，逼到寫無意義 stub。必填清單現為：`id` / `label` / `loadStatic` / `fetchStopEta` / `searchPlace`。
+2. **stop ID 格式描述要改**。原寫「所有營辦商都用 16 字符 stop ID」——實測 CTB 係 **6 位 zero-padded 數字字串**（如 `002737`）。兩者皆當 string 處理故無實際影響，但文件必須準確。
+
+**已實作的關機制**：
+
+| 項目 | 做法 |
+|------|------|
+| 公司切換 | 搜尋頁頂部 segmented control；切換時重載該公司離線 gz（切換器**只放搜尋頁**，深層頁切換要清多一倍狀態） |
+| 索引建構 | 抽出共用 `buildStore()`，兩家 gz schema 同構，**一份程式碼**服務兩個 adapter |
+| ETA 欄位 | `mapCtbEta()` 統一映射為 **KMB 欄位名**（`dest_tc` / `rmk_tc` / `service_type:null`），令 `normalizeEta` / `formatEta` 完全唔使改 |
+| ETA 來源 | 主用 DPO `batch/stop-eta/CTB/{id}?lang=zh-hant`（1 request／站）；掛時 fallback 用離線索引枚舉路線逐線 call 原生 `/eta` |
+| 輪詢頻率 | per-adapter：九巴 15s（實時）／城巴 30s（官方每分鐘更新，用 15s 會浪費 4× 請求） |
+| 收藏隔離 | `favorites` / `favRoutes` / `routeVisits` / `routeVisitsHidden` **四個 key 全部加 `co`**；舊無 `co` 資料讀取時 default `'kmb'` |
+| build 決定性 | CTB `/stop` 需並發抓 ~2,600 站，完成次序不確定 → **必須按 first-seen 次序重排**後才輸出，否則 buildId 每日必變 |
+
+**⚠️ 實測發現：計劃書原先的「方向 → 端點」映射寫反了**
+
+原計劃寫 `dir='I' → dest_tc`、`dir='O' → orig_tc`。實測（2026-10-09，7 條路線抽樣全中）證實**恰好相反**：
+
+```
+route 1：orig_tc = 中環 (港澳碼頭)、dest_tc = 跑馬地 (上)
+  DPO batch ETA 對 dir='O' 回 dest = 跑馬地(上)   ← 等於 dest_tc
+  /route-stop/CTB/1/inbound（dir='I'）末站 = 中環 (港澳碼頭) = orig_tc
+```
+
+即 **`O`（開往終點）→ `dest_tc`；`I`（往總站）→ `orig_tc`**，與 UI 顯示慣例（I = 往總站方向、O = 開往終點）一致。若照原計劃書實作，所有路線的**入站終點都會顯示錯**。[CTB-7] 測試已鎖定此行為。
+
+**離線資料規模（2026-10-09）**：九巴 6,752 站／1,605 路線方向（340 KB gz）；城巴 2,587 站／814 路線方向（127 KB gz）。
 
 ### 5.8 瀏覽器支援
 
@@ -524,7 +562,7 @@ const activeAdapter = TransportAdapters.kmb;
 | R5 | **Service Worker 快取陳舊** | 中 | 中 | 部署時生成版本號；`skipWaiting` + `clients.claim`；更新提示 banner |
 | R6 | **舊瀏覽器無 `DecompressionStream`** | 低 | 低 | pako fallback |
 | R7 | **ETA `null` 處理錯誤誤導用戶** | 中 | 高 | 按 `rmk_tc` 分流（§2.5）；單元測試覆蓋所有 `rmk` 分支 |
-| R8 | **多營辦商 stop ID 對齊錯誤** | 中 | 中 | 預留 adapter；MVP 階段唔做，唔引入此風險 |
+| R8 | **多營辦商 stop ID 對齊錯誤** | 中 | 中 | ✅ **M8 已用公司切換器模式處理**（一次只載入一家，天然無撞名風險）；跨公司物理站對齊留待後續 |
 
 ### 6.2 體驗風險
 

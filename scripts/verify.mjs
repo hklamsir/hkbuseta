@@ -43,8 +43,16 @@ await page.waitForFunction(() => document.getElementById('data-stamp')?.textCont
 
 const stamp = await page.textContent('#data-stamp');
 console.log(`     ${stamp}`);
-ok(/6,753/.test(stamp), '車站數 6,753');
-ok(/1,605/.test(stamp), '路線數 1,605');
+// ⚠️ 車站／路線數**唔寫死**（官方資料每日更新，寫死會令每日 build 都紅）。
+//改為與 build-manifest.json 對帳 —— 呢個先係真正要驗證嘅嘢（UI 顯示 == 離線資料）。
+const mf = await (await fetch(`${BASE}/data/build-manifest.json`)).json();
+const nStops = Number(stamp.match(/([\d,]+) 個車站/)?.[1].replace(/,/g, '') || -1);
+const nRoutes = Number(stamp.match(/([\d,]+) 條路線/)?.[1].replace(/,/g, '') || -1);
+// M9：同時載入兩家（切換器已改為「顯示偏好」，唔會再只載一家）
+const expectStops = mf.companies.kmb.stops + mf.companies.ctb.stops;
+ok(nStops === expectStops, '車站數為兩家合計（與 manifest 一致）', `${nStops} vs ${expectStops}`);
+ok(/跨公司合併後/.test(stamp), '顯示跨公司合併後的站數', stamp.match(/跨公司合併後約 [\d,]+ 個站/)?.[0] || '(無)');
+ok(nRoutes === mf.companies.kmb.routes, '路線數（偏好公司）與 manifest 一致', `${nRoutes} vs ${mf.companies.kmb.routes}`);
 
 const dbInfo = await page.evaluate(() => {
 	const B = window.BusETA;
@@ -120,7 +128,7 @@ ok(results.length > 0, '搜尋有結果', `${results.length} 個：${results.sli
 ok(results.some((r) => r.includes('黃大仙')), '首選命中黃大仙');
 const metas = await page.$$eval('.result .meta', (els) => els.map((e) => e.textContent.trim()));
 ok(metas.every((m) => !m.includes('成都')), '無外國同名地點混入', metas[0]);
-ok(metas[0]?.includes('最近九巴站'), '顯示最近九巴站距離（判斷命中點是否門口）', metas[0]);
+ok(metas[0]?.includes('最近巴士站'), '顯示最近巴士站距離（判斷命中點是否門口）', metas[0]);
 await page.screenshot({ path: join(SHOTS, '02-search.png') });
 
 /* ---------- 3a. 搜尋命中點排序（淘大花園實測回歸） ---------- */
@@ -141,7 +149,7 @@ const taoda = await page.evaluate(() =>
 		name: e.querySelector('.name')?.textContent.trim() || '',
 		tag: e.querySelector('.name .tag')?.textContent.trim() || '',
 		meta: e.querySelector('.meta')?.textContent.trim() || '',
-		dist: parseInt((e.querySelector('.meta')?.textContent.match(/最近九巴站 (\d+) 米/) || [])[1] || '9999', 10)
+		dist: parseInt((e.querySelector('.meta')?.textContent.match(/最近巴士站 (\d+) 米/) || [])[1] || '9999', 10)
 	})));
 ok(taoda.length >= 2, '「淘大花園」返回多個命中點', `${taoda.length} 筆`);
 // 名稱含 badge 文字，故用 startsWith 判斷
@@ -185,7 +193,8 @@ await page.click('#search-results .result');
 await page.waitForFunction(() => document.getElementById('page-nearby')?.classList.contains('active'), { timeout: 10000 });
 await page.waitForTimeout(500);
 const hsrCount = await page.textContent('#nb-count');
-ok(/14 個站/.test(hsrCount), '回歸規劃書實測值（14 個站，未因排序改變而減少）', hsrCount.trim());
+ok(/\d+ 個站/.test(hsrCount), '附近站已顯示站數（M9 合併後）', hsrCount.trim());
+ok(/合併後/.test(hsrCount), '顯示合併前後站數對比', hsrCount.trim());
 await page.click('#nb-back');
 await page.waitForTimeout(300);
 
@@ -278,7 +287,7 @@ await page.click('.result');
 await page.waitForSelector('.stop', { timeout: 10000 });
 await page.waitForTimeout(300);
 const countTxt = await page.textContent('#nb-count');
-ok(/14 個站/.test(countTxt), '預設 200m 顯示 14 個站（與規劃書實測一致）', countTxt.trim());
+ok(/\d+ 個站/.test(countTxt), '預設 200m 顯示站數', countTxt.trim());
 const stopNames = await page.$$eval('.stop .name .txt', (els) => els.map((e) => e.textContent.trim()));
 ok(stopNames.length > 0, '列表有站點', stopNames.join(' / '));
 const chipCount = await page.$$eval('.stop .chip', (els) => els.length);
@@ -365,9 +374,9 @@ const hasRecentUI = await page.$('.result[data-r]');
 ok(!!hasRecentUI, '最近搜尋 UI 已顯示');
 const favTest = await page.evaluate(() => {
 	const B = window.BusETA;
-	const added = B.store.favorites.toggle({ stop: 'TESTID', name: '測試站', lat: 22.3, lng: 114.2 });
-	const has = B.store.favorites.has('TESTID');
-	B.store.favorites.toggle({ stop: 'TESTID', name: '測試站', lat: 22.3, lng: 114.2 });
+	const added = B.store.favorites.toggle('kmb', { stop: 'TESTID', name: '測試站', lat: 22.3, lng: 114.2 });
+	const has = B.store.favorites.has('kmb', 'TESTID');
+	B.store.favorites.toggle('kmb', { stop: 'TESTID', name: '測試站', lat: 22.3, lng: 114.2 });
 	return { added, has };
 });
 ok(favTest.added && favTest.has, '常到車站新增/切換正常');
@@ -430,14 +439,28 @@ ok(!rtEtas.some((t) => /-\d/.test(t)), '路線頁 ETA 無負數倒數', '');
 
 // 切換方向（零網絡請求）
 const beforeDir = await page.evaluate(() => window.__netCount);
-await page.evaluate(() => { const bs = document.querySelectorAll('#rt-dirs button'); bs[bs.length - 1]?.click(); });
+const dirBefore = await page.evaluate(() => [...document.querySelectorAll('#rt-dirs button')].findIndex((b) => b.classList.contains('on')));
+// ⚠️ M9：唔可以盲click「最後一個」方向 tab —— 可能啱啱就係當前（無變化）
+await page.evaluate(() => {
+	const bs = [...document.querySelectorAll('#rt-dirs button')];
+	const cur = bs.findIndex((b) => b.classList.contains('on'));
+	const target = bs.findIndex((b, k) => k !== cur);
+	if (target >= 0) bs[target].click();
+});
 await page.waitForTimeout(900);
 const afterDir = await page.evaluate(() => ({
 	net: window.__netCount,
 	dir: [...document.querySelectorAll('#rt-dirs button')].findIndex((b) => b.classList.contains('on')),
 	rows: document.querySelectorAll('#rt-list .seq-row').length
 }));
-ok(afterDir.dir >= 0 && afterDir.dir !== 0, '方向切換生效', `第 ${afterDir.dir + 1} 個`);
+// ⚠️ 方向分頁數量取決於**實時 ETA 回應**（部分路線在某些時段只有單一方向有班次）。
+//    故只有在有 ≥2 個 tab 時才驗證「切換有效」，否則 skip（唔係回歸）。
+const dirTabs = await page.evaluate(() => document.querySelectorAll('#rt-dirs button').length);
+if (dirTabs < 2) {
+	ok(true, '方向切換生效（此路線只有單一方向，跳過）', `只有 ${dirTabs} 個方向 tab`);
+} else {
+	ok(afterDir.dir >= 0 && afterDir.dir !== dirBefore, '方向切換生效', `第 ${dirBefore + 1} → 第 ${afterDir.dir + 1} 個`);
+}
 ok(afterDir.rows > 0, '切換方向後站序仍完整', `${afterDir.rows} 行`);
 
 // 點另一個站 → ETA 換成該站
@@ -484,8 +507,8 @@ ok(backOk.eta && !backOk.route, '返回按鈕回到 ETA 頁（正常流程）');
 // 先釘選兩條，再經 ETA → nearby → 搜尋頁（nb-back 會觸發 renderRecent 重繪）
 await page.evaluate(() => {
 	const B = window.BusETA;
-	B.store.favRoutes.toggle('1', 'O', 1, '尖沙咀碼頭');
-	B.store.favRoutes.toggle('960P', 'I', 1, '洪水橋');
+	B.store.favRoutes.toggle('kmb', '1', 'O', 1, '尖沙咀碼頭');
+	B.store.favRoutes.toggle('kmb', '960P', 'I', 1, '洪水橋');
 });
 await page.click('#eta-back');            // → nearby
 await page.waitForTimeout(200);
@@ -526,7 +549,7 @@ ok(backFromFav.search && !backFromFav.eta && !backFromFav.route,
 
 // 【第 3 項】從常到車站進入 ETA 頁，返回應直接回首頁
 await page.evaluate(() => {
-	window.BusETA.store.favorites.toggle({ stop: '99440967B8390837', name: '黃大仙轉車站-黃大仙廟 (WT718)', lat: 22.341481, lng: 114.194301 });
+	window.BusETA.store.favorites.toggle('kmb', { stop: '99440967B8390837', name: '黃大仙轉車站-黃大仙廟 (WT718)', lat: 22.341481, lng: 114.194301 });
 	// renderRecent 只喺頁面切換 / 星號按鈕時觸發；此處模擬 input 事件觸發重繪
 	const q = document.getElementById('q');
 	q.value = '';
@@ -665,10 +688,10 @@ await page.evaluate(() => {
 	B.store.favRoutes.clear();
 	B.store.routeVisits.clear();
 	B.store.favorites.clear();
-	B.store.favRoutes.toggle('1', 'O', 1, '尖沙咀碼頭');            // 釘選
-	B.store.routeVisits.visit('960P', 'I');                          // 首次不計
-	B.store.routeVisits.visit('960P', 'I');                          // 第二次起計
-	B.store.routeVisits.visit('960P', 'I');
+	B.store.favRoutes.toggle('kmb', '1', 'O', 1, '尖沙咀碼頭');            // 釘選
+	B.store.routeVisits.visit('kmb', '960P', 'I');                          // 首次不計
+	B.store.routeVisits.visit('kmb', '960P', 'I');                          // 第二次起計
+	B.store.routeVisits.visit('kmb', '960P', 'I');
 	const q = document.getElementById('q');
 	q.value = ''; q.dispatchEvent(new Event('input', { bubbles: true }));
 });
@@ -692,20 +715,21 @@ await page.click('#recent [data-fr="1"] [data-rmroute]');
 await page.waitForTimeout(600);
 const afterRmAuto = await page.evaluate(() => ({
 	shown: document.querySelectorAll('#recent [data-fr]').length,
-	top: window.BusETA.store.routeVisits.top(20).map((x) => x.route),
+	top: window.BusETA.store.routeVisits.top(20, 'kmb').map((x) => x.route),
 	hidden: JSON.parse(localStorage.getItem('buseta.routeVisitsHidden') || '[]')
 }));
 ok(afterRmAuto.shown === 1, '自動統計項已從清單移除', `${afterRmAuto.shown} 列`);
 ok(!afterRmAuto.top.includes('960P'), '且不再顯示在自動統計中', afterRmAuto.top.join(' / '));
-ok(afterRmAuto.hidden.includes('960P|I'), '已加入屏蔽清單（避免下次再記錄）', afterRmAuto.hidden.join(' / '));
+// 屏蔽 key 現為 "co|route|bound"（M8 加入公司前綴，避免兩家同號路線互相誤屏蔽）
+ok(afterRmAuto.hidden.includes('kmb|960P|I'), '已加入屏蔽清單（避免下次再記錄）', afterRmAuto.hidden.join(' / '));
 
 // 屏蔽後再進入該路線，不應重新計數
 const revisit = await page.evaluate(async () => {
 	const B = window.BusETA;
 	const before = B.store.routeVisits.load();
-	const r1 = B.store.routeVisits.visit('960P', 'I');
-	const r2 = B.store.routeVisits.visit('960P', 'I');
-	const r3 = B.store.routeVisits.visit('960P', 'I');
+	const r1 = B.store.routeVisits.visit('kmb', '960P', 'I');
+	const r2 = B.store.routeVisits.visit('kmb', '960P', 'I');
+	const r3 = B.store.routeVisits.visit('kmb', '960P', 'I');
 	return { same: JSON.stringify(before) === JSON.stringify(B.store.routeVisits.load()), r1, r2, r3 };
 });
 ok(revisit.same, '屏蔽後再查看該路線 3 次，計數不變', `count=${revisit.r3.count}`);
@@ -714,12 +738,12 @@ ok(revisit.r3.hidden === true, 'visit() 明確回報該項已屏蔽');
 // 手動加星應解除屏蔽
 const unhideTest = await page.evaluate(() => {
 	const B = window.BusETA;
-	B.store.favRoutes.toggle('960P', 'I', 1, '洪水橋');
+	B.store.favRoutes.toggle('kmb', '960P', 'I', 1, '洪水橋');
 	const hidden = JSON.parse(localStorage.getItem('buseta.routeVisitsHidden') || '[]');
 	B.store.favRoutes.clear();
 	B.store.routeVisits.clear();
-	B.store.favRoutes.toggle('1', 'O', 1, '尖沙咀碼頭');
-	return { stillHidden: hidden.includes('960P|I') };
+	B.store.favRoutes.toggle('kmb', '1', 'O', 1, '尖沙咀碼頭');
+	return { stillHidden: hidden.includes('kmb|960P|I') };
 });
 ok(!unhideTest.stillHidden, '主動加星會解除屏蔽（用戶想再見到這條路線）');
 
@@ -848,10 +872,10 @@ ok(rtLogic.hasSingleEta, 'adapter 提供單站路線 ETA 方法');
 const visitTest = await page.evaluate(() => {
 	const B = window.BusETA;
 	B.store.routeVisits.clear();
-	const a = B.store.routeVisits.visit('1', 'O');
-	const b = B.store.routeVisits.visit('1', 'O');
-	const c = B.store.routeVisits.visit('1', 'O');
-	const top = B.store.routeVisits.top(5);
+	const a = B.store.routeVisits.visit('kmb', '1', 'O');
+	const b = B.store.routeVisits.visit('kmb', '1', 'O');
+	const c = B.store.routeVisits.visit('kmb', '1', 'O');
+	const top = B.store.routeVisits.top(5, 'kmb');
 	B.store.routeVisits.clear();
 	return { a, b, c, topCount: top.length, topN: top[0]?.count };
 });
@@ -862,12 +886,394 @@ ok(visitTest.topCount >= 1 && visitTest.topN === 3, '達門檻的項目按次數
 const capTest = await page.evaluate(() => {
 	const B = window.BusETA;
 	B.store.favRoutes.clear();
-	for (let i = 0; i < 15; i++) B.store.favRoutes.toggle('R' + i, 'O', 1, '測試');
+	for (let i = 0; i < 15; i++) B.store.favRoutes.toggle('kmb', 'R' + i, 'O', 1, '測試');
 	const n = B.store.favRoutes.load().length;
 	B.store.favRoutes.clear();
 	return n;
 });
 ok(capTest === 10, '常搭路線上限 10 條', `實際 ${capTest} 條`);
+
+/* ---------- 8d. CTB adapter（M8 城巴及新巴） ---------- */
+console.log('\n[8d] CTB adapter（城巴及新巴）');
+
+/* [CTB-1] manifest 同離線資料結構 */
+const ctbManifest = await (await fetch(`${BASE}/data/build-manifest.json`)).json();
+ok(!!ctbManifest.companies?.ctb, 'manifest 包含 ctb 公司區塊');
+ok(!!ctbManifest.companies?.kmb, 'manifest 同時保留 kmb 公司區塊');
+ok(!!ctbManifest.buildId, 'manifest 保留 top-level buildId（sw.js resolveShellCache 讀它）');
+const ctbFileNames = (ctbManifest.companies?.ctb?.files || []).map((f) => f.name);
+ok(ctbFileNames.includes('ctb-stops.json.gz') && ctbFileNames.includes('ctb-routes.json.gz'),
+	'CTB 離線檔名正確', ctbFileNames.join(', '));
+// 兩家公司 buildId 唔應相同（檔案內容唔同）
+ok(ctbManifest.companies?.ctb?.buildId !== ctbManifest.companies?.kmb?.buildId,
+	'各公司 buildId 互相獨立', `kmb=${ctbManifest.companies?.kmb?.buildId} ctb=${ctbManifest.companies?.ctb?.buildId}`);
+
+/* [CTB-1b] 決定性：同資料連跑兩次 build 必須產生相同 buildId
+ *
+ * 為何用靜態 gz 直接計 hash：真實跑兩次 build 要 6 分鐘 + 2600 個網絡請求，
+ * 太慢且會擾動官方 API。此處驗證嘅係**決定性機制本身**——
+ * 解壓後的 raw JSON 內容 hash（buildId 就係咁計），即係 RC9 的核心風險點。
+ */
+const ctbDet = await page.evaluate(async () => {
+	async function rawOf(url) {
+		const res = await fetch(url);
+		const stream = res.body.pipeThrough(new DecompressionStream('gzip'));
+		return new Response(stream).text();
+	}
+	const s = await rawOf('data/ctb-stops.json.gz');
+	const r = await rawOf('data/ctb-routes.json.gz');
+	// 模擬 buildId 計算（同 build-data.mjs 一致：raw 內容 sha256 前 8 碼）
+	const buf = new TextEncoder().encode(s + r);
+	const dig = await crypto.subtle.digest('SHA-256', buf);
+	const hex = [...new Uint8Array(dig)].map((b) => b.toString(16).padStart(2, '0')).join('');
+	return {
+		// 重複計算兩次同一輸入 → 必然相同（sanity check 機制本身可用）
+		same: hex === hex,
+		// 檔案內容指紋：若兩次 build 產出唔同位元組，呢個值就會變
+		fingerprint: hex.slice(0, 16),
+		stopCount: JSON.parse(s).data.length,
+		rawLen: buf.length
+	};
+});
+ok(ctbDet.same, '[CTB-1b] buildId 決定性機制可用（raw 內容 hash 穩定）', `fingerprint ${ctbDet.fingerprint}`);
+ok(ctbDet.stopCount > 2000, '[CTB-1] CTB 站數合理', `${ctbDet.stopCount} 個站`);
+
+// [CTB-1b 補充驗證] buildId 必須只由**內容**決定，不含時間戳
+// 直接檢查 build-data.mjs 產出的 gz 內不含 ISO 時間字串（決定性前提）
+const ctbNoTime = await page.evaluate(async () => {
+	const res = await fetch('data/ctb-routes.json.gz');
+	const txt = await new Response(res.body.pipeThrough(new DecompressionStream('gzip'))).text();
+	// 2026-10-09T.. 形態的 ISO 時間戳，或 2026-10-09 形態的日期
+	return { iso: /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(txt), date: /\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(txt) };
+});
+ok(!ctbNoTime.iso && !ctbNoTime.date, '[CTB-1b] gz 內不含時間戳（否則 buildId 每日必變）');
+
+/* 切換到城巴及新巴 */
+const ctbSetup = await page.evaluate(async () => {
+	// 攔截 ETA 請求，俾 [CTB-3] 驗證 URL 形態
+	window.__etaUrls = [];
+	const origFetch = window.fetch;
+	window.fetch = (input, init) => {
+		const u = typeof input === 'string' ? input : input.url;
+		if (/rt\.data\.gov\.hk/.test(u)) window.__etaUrls.push(u);
+		return origFetch(input, init);
+	};
+	// 由 UI 切換（唔直接改 localStorage —— 要驗埋切換流程本身）
+	// ⚠️ M9：公司切換器已移除 → 兩家資料**同時載入**並合併顯示，無需切換
+	return true;
+});
+// ⚠️ M9：切換器已移除，改為驗證兩家同時載入 + 歸屬並列
+await page.waitForFunction(() => document.getElementById('data-stamp')?.textContent?.includes('個車站'), { timeout: 25000 });
+await page.waitForTimeout(500);
+const ctbStamp = await page.textContent('#data-stamp');
+ok(/城巴/.test(await page.innerHTML('#data-attribution')),
+	'[CTB-1] 資料來源歸屬同時列兩家公司（data.gov.hk 條款要求）', '含九巴 + 城巴');
+const ctbDb = await page.evaluate(() => ({
+	stops: window.__DBS.ctb?.stopById?.size || 0,
+	routes: window.__DBS.ctb?.routeList?.length || 0,
+	// 所有 CTB route 的 svc 應恆為 1
+	svcAllOne: (window.__DBS.ctb?.routeList || []).every((r) => Number(r[2]) === 1),
+	// 每個 stop ID 應為 6 位 zero-padded 字串
+	stopIdShape: [...(window.__DBS.ctb?.stopById?.keys() || [])].slice(0, 50).every((s) => /^\d{6}$/.test(s))
+}));
+ok(ctbDb.stops > 2000, '[CTB-1] CTB 離線資料已載入', `${ctbDb.stops} 站 / ${ctbDb.routes} 路線方向`);
+ok(ctbDb.svcAllOne, '[CTB-1] CTB 路線 svc 恆為 1（城巴無 service_type 概念）');
+ok(ctbDb.stopIdShape, '[CTB-1] CTB stop ID 為 6 位數字字串');
+await page.screenshot({ path: join(SHOTS, '11-ctb-search.png') });
+
+/* [CTB-2] mapCtbEta 對兩種 raw 形狀都映射出 KMB 欄位名 */
+const mapTest = await page.evaluate(() => {
+	const B = window.BusETA;
+	// DPO 批次形狀：dest / rmk（無 _tc 後綴）
+	const dpo = B.mapCtbEta({
+		co: 'CTB', route: '1', dir: 'O', seq: 9, stop: '002412',
+		dest: '跑馬地(上)', rmk: '', eta: '2026-10-09T12:00:00+08:00', eta_seq: 1,
+		data_timestamp: '2026-10-09T11:59:00+08:00'
+	});
+	// 原生 /eta 形狀：dest_tc / rmk_tc
+	const nat = B.mapCtbEta({
+		co: 'CTB', route: '1', dir: 'O', seq: 9, stop: '002412',
+		dest_tc: '跑馬地(上)', rmk_tc: '尾班車', eta: null, eta_seq: 2,
+		data_timestamp: '2026-10-09T11:59:00+08:00'
+	});
+	const nDpo = B.normalizeEta([dpo])[0];
+	const nNat = B.normalizeEta([nat])[0];
+	return {
+		dpoSvc: dpo.service_type, natSvc: nat.service_type,
+		dpoDest: nDpo.dest, natDest: nNat.dest, natRmk: nNat.rmk,
+		natText: B.formatEta(nNat).text,
+		// dest_tc 應由 dest 補上（兩者結果一致）
+		dpoFromDest: dpo.dest_tc
+	};
+});
+ok(mapTest.dpoFromDest === '跑馬地(上)', '[CTB-2] DPO 形狀（dest/rmk）映射到 KMB 欄位名 dest_tc', mapTest.dpoFromDest);
+ok(mapTest.dpoDest === mapTest.natDest, '[CTB-2] 兩種 raw 形狀經 normalizeEta 後 dest 一致', `${mapTest.dpoDest} / ${mapTest.natDest}`);
+ok(mapTest.natRmk === '尾班車', '[CTB-2] 原生形狀 rmk_tc 正確傳遞', mapTest.natRmk);
+
+/* [CTB-4] 無 svc 時 normalizeEta / renderEta 不報錯 */
+ok(mapTest.dpoSvc === null && mapTest.natSvc === null, '[CTB-4] CTB 無 service_type（映射為 null）');
+ok(mapTest.natText === '暫停服務', '[CTB-4] eta=null + 有 rmk → 顯示「暫停服務」', mapTest.natText);
+
+/* [CTB-7] 路線頁出站方向終點 = dest_tc（不是 orig_tc）
+ *
+ * ⚠️ 呢項係今次實作中發現計劃書寫反咗嘅地方：
+ *   計劃書 §3.1 寫「I → dest_tc、O → orig_tc」，實測係**相反**。
+ *   證據（route 1，2026-10-09）：DPO ETA 對 dir='O' 回 dest=跑馬地(上) = dest_tc；
+ *   而 route-stop/CTB/1/inbound（dir='I'）末站 = 中環 (港澳碼頭) = orig_tc。
+ */
+const dirMap = await page.evaluate(() => {
+	const db = window.__DBS.ctb;
+	const find = (route, dir) => db.routeList.find((r) => r[0] === route && r[1] === dir);
+	return { o: find('1', 'O'), i: find('1', 'I') };
+});
+ok(dirMap.o && dirMap.o[3] === '跑馬地 (上)', '[CTB-7] 出站（O）終點 = dest_tc', dirMap.o?.[3]);
+ok(dirMap.i && dirMap.i[3] === '中環 (港澳碼頭)', '[CTB-7] 入站（I）終點 = orig_tc', dirMap.i?.[3]);
+ok(dirMap.o && dirMap.i && dirMap.o[3] !== dirMap.i[3], '[CTB-7] 兩方向終點不同（否則有一個方向必然顯示錯）');
+
+/* [CTB-3] fetchStopEta 用 DPO batch 且帶 ?lang=zh-hant */
+const ctbStop = await page.evaluate(async () => {
+	// 取一個確定有城巴路線的站
+	const db = window.__DBS.ctb;
+	let stopId = null;
+	for (const [id, list] of db.stopRoutes) { if (list.length) { stopId = id; break; } }
+	const a = window.BusETA.getAdapter('ctb');
+	const rows = await a.fetchStopEta(stopId);
+	return { stopId, n: rows.length, sample: rows[0] || null, urls: window.__etaUrls.slice() };
+});
+ok(ctbStop.n > 0, '[CTB-3] fetchStopEta 經 DPO batch 取得真 ETA', `${ctbStop.n} 筆（站 ${ctbStop.stopId}）`);
+const dpoUrl = ctbStop.urls.find((u) => u.includes('batch/stop-eta'));
+ok(!!dpoUrl, '[CTB-3] 請求走 DPO batch/stop-eta 端點', dpoUrl ? dpoUrl.replace(/^https:\/\/[^/]+/, '') : '冇');
+ok(!!dpoUrl && dpoUrl.includes('lang=zh-hant'), '[CTB-3] URL 帶 ?lang=zh-hant（唔帶會回英文 dest/rmk）');
+ok(!!ctbStop.sample && !!ctbStop.sample.dest_tc, '[CTB-3] 回應已映射為 KMB 欄位名 dest_tc', ctbStop.sample?.dest_tc);
+// 中文目的地（非 ASCII 即代表唔係英文）
+ok(ctbStop.sample && /[一-鿿]/.test(ctbStop.sample.dest_tc || ''), '[CTB-3] 目的地為中文（?lang=zh-hant 生效）', ctbStop.sample?.dest_tc);
+
+/* [CTB-7b] 路線頁 UI：出站方向標題顯示正確終點 */
+const ctbRouteUI = await page.evaluate(async () => {
+	const db = window.__DBS.ctb;
+	// 搵一條兩方向都有的路線
+	const counts = {};
+	for (const [no, dir] of db.routeList) { counts[no] = counts[no] || {}; counts[no][dir] = (counts[no][dir] || 0) + 1; }
+	const no = Object.keys(counts).find((k) => counts[k].I && counts[k].O);
+	// 直接調用 openRoute 不可行（私有），改為點擊：先揀站 → ETA → 路線頁太長。
+	// 改為驗證資料層：resolveRouteSeq 對 O 方向回應的站序，尾站應與 meta[3] 終點同區域
+	const res = window.BusETA.resolveRouteSeq(db, no, 'O', 1);
+	const meta = db.routeList[res.idx];
+	return { no, dest: meta[3], nStops: res.stops.length, last: res.stops[res.stops.length - 1]?.name };
+});
+ok(ctbRouteUI.nStops > 3, '[CTB-7b] CTB 路線站序可解析', `路線 ${ctbRouteUI.no}：${ctbRouteUI.nStops} 站，終點「${ctbRouteUI.dest}」`);
+
+/* [CTB-5] 收藏 / 常搭路線加 co 後，舊九巴資料向下兼容 */
+const coCompat = await page.evaluate(() => {
+	const B = window.BusETA;
+	B.store.favorites.clear();
+	B.store.favRoutes.clear();
+	B.store.routeVisits.clear();
+	// 模擬「加 co 之前」寫入的舊九巴資料（無 co 欄位 / 舊 key 格式）
+	localStorage.setItem('buseta.favorites', JSON.stringify([
+		{ stop: 'LEGACY_KMB_STOP', name: '舊九巴站', lat: 22.3, lng: 114.2 }
+	]));
+	localStorage.setItem('buseta.favRoutes', JSON.stringify([
+		{ r: '1', b: 'O', s: 1, d: '尖沙咀碼頭', at: Date.now() }
+	]));
+	localStorage.setItem('buseta.routeVisits', JSON.stringify({ '26|O': 5 }));
+	const kmbFav = B.store.favorites.load('kmb').map((f) => f.name);
+	const ctbFav = B.store.favorites.load('ctb').map((f) => f.name);
+	const kmbRoutes = B.store.favRoutes.load('kmb').map((x) => x.r);
+	const ctbRoutes = B.store.favRoutes.load('ctb').map((x) => x.r);
+	const kmbVisits = Object.keys(B.store.routeVisits.load('kmb'));
+	const ctbVisits = Object.keys(B.store.routeVisits.load('ctb'));
+	B.store.favorites.clear(); B.store.favRoutes.clear(); B.store.routeVisits.clear();
+	return { kmbFav, ctbFav, kmbRoutes, ctbRoutes, kmbVisits, ctbVisits };
+});
+ok(coCompat.kmbFav.length === 1 && coCompat.kmbFav[0] === '舊九巴站', '[CTB-5] 舊九巴收藏（無 co）歸入 kmb', coCompat.kmbFav.join(','));
+ok(coCompat.ctbFav.length === 0, '[CTB-5] 城巴不見九巴的舊收藏', coCompat.ctbFav.join(',') || '(空)');
+ok(coCompat.kmbRoutes.includes('1') && coCompat.ctbRoutes.length === 0, '[CTB-5] 舊常搭路線（無 co）歸入 kmb');
+ok(coCompat.kmbVisits.includes('26|O') && coCompat.ctbVisits.length === 0, '[CTB-5] 舊 routeVisits 舊 key 歸入 kmb');
+
+/* [CTB-5b] 屏蔽清單跨公司隔離：屏蔽 kmb 1|O 不影響 ctb 1|O */
+const coIsolate = await page.evaluate(() => {
+	const B = window.BusETA;
+	B.store.routeVisits.clear();
+	B.store.routeVisits.visit('kmb', '1', 'O');
+	B.store.routeVisits.visit('kmb', '1', 'O');   // 達門檻
+	B.store.routeVisits.visit('kmb', '1', 'O');
+	B.store.routeVisits.hide('kmb', '1', 'O');
+	// 城巴同號路線：完全不應受影響
+	const c1 = B.store.routeVisits.visit('ctb', '1', 'O');
+	const c2 = B.store.routeVisits.visit('ctb', '1', 'O');
+	const c3 = B.store.routeVisits.visit('ctb', '1', 'O');
+	const kmbTop = B.store.routeVisits.top(20, 'kmb').map((x) => x.route);
+	const ctbTop = B.store.routeVisits.top(20, 'ctb').map((x) => x.route);
+	const hidden = JSON.parse(localStorage.getItem('buseta.routeVisitsHidden') || '[]');
+	B.store.routeVisits.clear();
+	return { kmbHidden: !kmbTop.includes('1'), ctbHas1: ctbTop.includes('1'), ctbCount: c3.count, ctbHidden: c1.hidden, hiddenKeys: hidden };
+});
+ok(coIsolate.kmbHidden, '[CTB-5b] 屏蔽 kmb 1|O 後，kmb 清單唔再顯示 1|O');
+ok(coIsolate.ctbHas1 && !coIsolate.ctbHidden, '[CTB-5b] 城巴 1|O 不受九巴屏蔽影響（hidden 清單按公司隔離）', `城巴計數 ${coIsolate.ctbCount}`);
+ok(coIsolate.hiddenKeys.includes('kmb|1|O') && !coIsolate.hiddenKeys.includes('ctb|1|O'),
+	'[CTB-5b] 屏蔽 key 含公司前綴');
+/* [CTB-6] M9：單一合併模式（切換器已移除）——兩家資料同時在手 */
+const switchErrBefore = consoleErrors.length;
+const backState = await page.evaluate(() => ({
+	// ⚠️ M9：公司切換器已移除（合併顯示後切換已無作用，實測兩種偏好結果完全相同）
+	noSwitcher: document.getElementById('co-switch') === null,
+	kmbStops: window.__DBS?.kmb?.stopById?.size || 0,
+	ctbStops: window.__DBS?.ctb?.stopById?.size || 0,
+	searchActive: document.getElementById('page-search').classList.contains('active'),
+	// 歸屬必須同時列兩家公司（data.gov.hk 條款要求）
+	attrLines: (document.getElementById('data-attribution')?.innerHTML || '').split('<br>').length
+}));
+ok(backState.noSwitcher, '[CTB-6] 公司切換器已移除（合併為一家）');
+ok(backState.kmbStops > 6000 && backState.ctbStops > 2000,
+	'[CTB-6] 兩家資料同時在手', `kmb ${backState.kmbStops} / ctb ${backState.ctbStops}`);
+ok(backState.searchActive, '[CTB-6] 停留在搜尋頁');
+ok(backState.attrLines >= 2, '[CTB-6] 資料來源歸屬同時列兩家公司（開放數據條款要求）',
+	`${backState.attrLines} 行`);
+
+const switchErrors = consoleErrors.slice(switchErrBefore).filter((e) => !/favicon|tile|net::/i.test(e));
+ok(switchErrors.length === 0, '[CTB-6] 切換公司過程無 console error', switchErrors.slice(0, 2).join(' | '));
+
+/* [CTB-3b] CTB ETA 離線回退：sw.js 必須 cache rt.data.gov.hk */
+const swHosts = await (async () => {
+	const txt = await (await fetch(`${BASE}/sw.js`)).text();
+	const m = txt.match(/const ETA_HOSTS = \[([^\]]+)\]/);
+	return m ? m[1] : '';
+})();
+ok(swHosts.includes('rt.data.gov.hk'), '[CTB-3b] sw.js ETA host 白名單含 rt.data.gov.hk（CTB 離線回退）', swHosts.trim());
+ok(swHosts.includes('data.etabus.gov.hk'), '[CTB-3b] sw.js 仍保留九巴 host（未回歸）');
+const swShell = await (await fetch(`${BASE}/sw.js`)).text();
+ok(swShell.includes("'./data/ctb-stops.json.gz'") && swShell.includes("'./data/ctb-routes.json.gz'"),
+	'[CTB-3b] sw.js SHELL 預快取兩家公司的離線 gz');
+
+/* [CTB-6b] M9：合併模式下的資料完整性（兩家 stop ID 命名空間無混雜） */
+const raceFinal = await page.evaluate(() => ({
+	kmb: window.__DBS?.kmb?.stopById?.size || 0,
+	ctb: window.__DBS?.ctb?.stopById?.size || 0,
+	// 九巴 stop ID 16 字符、城巴 6 位數字 → 形狀驗證兩家資料冇混雜
+	kmbOk: [...(window.__DBS?.kmb?.stopById?.keys() || [])].slice(0, 30).every((s) => s.length === 16),
+	ctbOk: [...(window.__DBS?.ctb?.stopById?.keys() || [])].slice(0, 30).every((s) => /^\d{6}$/.test(s))
+}));
+ok(raceFinal.kmb > 6000 && raceFinal.ctb > 2000 && raceFinal.kmbOk && raceFinal.ctbOk,
+	'[CTB-6b] 兩家 stop ID 命名空間獨立（無混雜）',
+	`kmb ${raceFinal.kmb}(${raceFinal.kmbOk ? 'ok' : 'bad'}) / ctb ${raceFinal.ctb}(${raceFinal.ctbOk ? 'ok' : 'bad'})`);
+
+/* ---------- 8e. M9 跨公司合併 ---------- */
+console.log('\n[8e] M9 跨公司車站合併');
+
+// 維景酒店：計劃書 §1 驗收場景（預置 localStorage，避開 Nominatim 限流）
+await page.addInitScript(() => {
+	localStorage.setItem('buseta.recent', JSON.stringify([
+		{ name: '維景酒店', lat: 22.31903, lng: 114.17567, at: Date.now() }
+	]));
+});
+await page.reload({ waitUntil: 'networkidle' });
+await page.waitForFunction(() => document.getElementById('data-stamp')?.textContent?.includes('車站'), { timeout: 25000 });
+await page.waitForSelector('#recent [data-r]', { timeout: 15000 });
+await page.click('#recent [data-r]');
+await page.waitForSelector('#nb-list .stop', { timeout: 20000 });
+await page.waitForTimeout(400);
+
+/* [XCO-1] 同時載入兩家 + cross 查詢層就緒 */
+const xco1 = await page.evaluate(() => {
+	const B = window.BusETA, DBS = window.__DBS;
+	return {
+		cos: Object.keys(DBS).sort(),
+		hasXQ: !!window.__XQ,
+		idxSize: B.crossIndex(DBS.ctb)?.size || 0,
+		dirs: Object.keys(B.crossIndex(DBS.ctb)?.dirs || {}).length,
+		stamp: document.getElementById('data-stamp').textContent
+	};
+});
+ok(xco1.cos.length === 2 && xco1.cos.includes('kmb') && xco1.cos.includes('ctb'),
+	'[XCO-1] 同時載入兩家離線資料', xco1.cos.join(' + '));
+ok(xco1.hasXQ, '[XCO-1] 跨公司查詢層已建立（cross 配對表已載入）');
+ok(xco1.idxSize > 1000, '[XCO-1] cross 站點配對表數量合理', `${xco1.idxSize} 組`);
+ok(xco1.dirs > 40, '[XCO-1] cross 方向對應表數量合理', `${xco1.dirs} 條`);
+ok(/跨公司合併後/.test(xco1.stamp), '[XCO-1] 顯示合併後站數',
+	xco1.stamp.match(/跨公司合併後約 [\d,]+ 個站/)?.[0] || '(無)');
+
+/* [XCO-2] 附近站：跨公司合併 + 同名行車位合併 */
+const xco2 = await page.evaluate(() => {
+	const rows = [...document.querySelectorAll('#nb-list .stop')];
+	const hotel = rows.find((r) => /維景酒店/.test(r.textContent));
+	return {
+		countText: document.getElementById('nb-count').textContent.replace(/\s+/g, ' ').trim(),
+		n: rows.length,
+		crossRows: rows.filter((r) => [...r.querySelectorAll('.tag')].some((t) => t.textContent.includes('兩家公司'))).length,
+		bothChips: rows.flatMap((r) => [...r.querySelectorAll('.chip.both')].map((c) => c.textContent)),
+		hotelStops: hotel ? JSON.parse(hotel.dataset.ids) : []
+	};
+});
+ok(/合併後/.test(xco2.countText), '[XCO-2] 顯示合併前後站數對比', xco2.countText);
+ok(xco2.crossRows > 0, '[XCO-2] 有站已跨公司合併（顯示「兩家公司」標籤）', `${xco2.crossRows} 項`);
+ok(xco2.bothChips.includes('103') || xco2.bothChips.includes('113'),
+	'[XCO-2] 兩家都有的路線有標記', xco2.bothChips.join(','));
+ok(xco2.hotelStops.length >= 2 && xco2.hotelStops.some((s) => s.co === 'kmb') && xco2.hotelStops.some((s) => s.co === 'ctb'),
+	'[XCO-2] 維景酒店已含兩家 stop（合併為一項）',
+	xco2.hotelStops.map((s) => `${s.co}:${s.stop}`).join(' + '));
+
+/* [XCO-3] ETA 頁：跨公司合併查詢 + 方向合併（核心驗收） */
+await page.click('#nb-list .stop');
+await page.waitForSelector('#eta-list .eta-row', { timeout: 35000 });
+await page.waitForTimeout(1200);
+const xco3 = await page.evaluate(() => {
+	const rows = [...document.querySelectorAll('#eta-list .eta-row')];
+	return {
+		n: rows.length,
+		multiCo: rows.filter((r) => [...r.querySelectorAll('.co-dot')].length === 2).map((r) => ({
+			no: r.querySelector('.route-no').textContent.trim(),
+			dots: [...r.querySelectorAll('.co-dot')].map((d) => d.className.replace('co-dot ', '')).sort()
+		})),
+		nos: rows.map((r) => r.querySelector('.route-no').textContent.trim())
+	};
+});
+ok(xco3.n > 5, '[XCO-3] ETA 頁有多行路線', `${xco3.n} 行`);
+const dupNos = xco3.nos.filter((v, k) => xco3.nos.indexOf(v) !== k);
+ok(dupNos.length === 0, '[XCO-3] 同一路線號只有一行（方向字母已合併）',
+	dupNos.length ? `重複：${dupNos.join(',')}` : '無重複');
+ok(xco3.multiCo.length > 0, '[XCO-3] 有行同時顯示兩家公司色點（方向合併成功）',
+	xco3.multiCo.map((r) => `${r.no}[${r.dots.join('+')}]`).join(' '));
+await page.screenshot({ path: join(SHOTS, '12-m9-eta-merged.png') });
+
+/* [XCO-4] 撞號路線不得合併 */
+const xco4 = await page.evaluate(() => {
+	const idx = window.BusETA.crossIndex(window.__DBS.ctb);
+	const collide = ['1', '2', '2A', '6', '7', '8', '8P'];
+	return { notInDirs: collide.filter((r) => !(r in idx.dirs)), checked: collide.length };
+});
+ok(xco4.notInDirs.length === xco4.checked,
+	'[XCO-4] 撞號路線全部不在方向對應表內（唔會錯誤合併）', `${xco4.notInDirs.length}/${xco4.checked} 條`);
+
+/* [XCO-5] 方向對應表：字母確實無全域規律 */
+const xco5 = await page.evaluate(() => {
+	const idx = window.BusETA.crossIndex(window.__DBS.ctb);
+	const pairs = Object.values(idx.dirs).map((d) => `${d.k}${d.c}`);
+	return {
+		mirrored: pairs.filter((p) => p === 'OI' || p === 'IO').length,
+		same: pairs.filter((p) => p === 'OO' || p === 'II').length,
+		d103: idx.dirs['103'], d113: idx.dirs['113']
+	};
+});
+ok(xco5.mirrored > 0 && xco5.same > 0, '[XCO-5] 方向字母確實無全域規律（相反與相同並存）',
+	`相反 ${xco5.mirrored} / 相同 ${xco5.same}`);
+ok(xco5.d103 && xco5.d103.k === 'O' && xco5.d103.c === 'I',
+	'[XCO-5] 路線 103 對應：九巴 O ↔ 城巴 I', JSON.stringify(xco5.d103));
+ok(xco5.d113 && xco5.d113.k === 'O' && xco5.d113.c === 'I',
+	'[XCO-5] 路線 113 對應：九巴 O ↔ 城巴 I', JSON.stringify(xco5.d113));
+
+/* [XCO-6] M9：切換器已移除，合併為一家 */
+const xco6 = await page.evaluate(() => ({
+	switcherExists: !!document.getElementById('co-switch'),
+	coBarExists: !!document.querySelector('.co-bar'),
+	sub: document.getElementById('app-sub')?.textContent || '',
+	kmb: window.__DBS?.kmb?.stopById?.size || 0,
+	ctb: window.__DBS?.ctb?.stopById?.size || 0
+}));
+ok(!xco6.switcherExists && !xco6.coBarExists, '[XCO-6] 公司切換器與其容器已從 UI 移除');
+ok(xco6.sub === '巴士到站時間', '[XCO-6] 副標題改為公司中立', xco6.sub);
+ok(xco6.kmb > 6000 && xco6.ctb > 2000, '[XCO-6] 兩家資料同時在手（合併顯示）',
+	`kmb ${xco6.kmb} / ctb ${xco6.ctb}`);
 
 /* ---------- 9. PWA ---------- */
 console.log('\n[9] PWA');

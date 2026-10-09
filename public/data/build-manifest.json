@@ -1,7 +1,7 @@
 {
-  "built": "2026-10-09T01:18:23.609Z",
-  "updated": "2026-10-09 01:18",
-  "buildId": "f1fa6f6b",
+  "built": "2026-10-09T05:16:43.292Z",
+  "updated": "2026-10-09 05:16",
+  "buildId": "479b5bd8",
   "stops": 6752,
   "routes": 1605,
   "routeStops": 36335,
@@ -16,5 +16,54 @@
       "raw": 548116,
       "gz": 164818
     }
-  ]
+  ],
+  "companies": {
+    "kmb": {
+      "label": "九巴及龍運",
+      "buildId": "f1fa6f6b",
+      "stops": 6752,
+      "routes": 1605,
+      "routeStops": 36335,
+      "files": [
+        {
+          "name": "stops.json.gz",
+          "raw": 450499,
+          "gz": 181737
+        },
+        {
+          "name": "routes.json.gz",
+          "raw": 548116,
+          "gz": 164818
+        }
+      ]
+    },
+    "ctb": {
+      "label": "城巴及新巴",
+      "buildId": "7a078af5",
+      "stops": 2587,
+      "routes": 814,
+      "routeStops": 17404,
+      "files": [
+        {
+          "name": "ctb-stops.json.gz",
+          "raw": 153764,
+          "gz": 52543
+        },
+        {
+          "name": "ctb-routes.json.gz",
+          "raw": 288769,
+          "gz": 92817
+        }
+      ]
+    }
+  },
+  "cross": {
+    "pairs": 1097,
+    "oneToMany": 53,
+    "matchedCtb": 1151,
+    "dirs": 54,
+    "sharedRoutes": 149,
+    "collide": 55,
+    "uncertain": 40
+  }
 }
