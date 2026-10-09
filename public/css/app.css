@@ -227,7 +227,8 @@ body {
 
 /* 公司切換器（M8 多營辦商）
    只出現喺搜尋頁頂部。用 segmented control 樣式（與 .range-seg 一致嘅視覺語言），
-   令用戶一眼認出「呢個係可點擊嘅分頁」而非裝飾文字。 */
+   令用戶一眼認出「呢個係可點擊嘅分頁」而非裝飾文字。
+   ⚠️ M9：切換已改為「顯示偏好」，切換**唔會**重載離線資料（兩家都載入）。 */
 .co-bar {
 	padding: 10px 14px 2px;
 	background: var(--surface);
@@ -264,6 +265,27 @@ body {
 
 /* 切換公司期間的載入提示（佔位避免版面跳動） */
 #co-loading:not(:empty) { padding: 12px 14px 4px; }
+
+/* ── M9 跨公司合併 ── */
+
+/* ETA 行的公司色點：同一路線同一方向已合併成一行，
+   用色點告訴用戶班次來自邊家（若兩家都有則顯示兩粒）。 */
+.co-dots { display: inline-flex; gap: 3px; margin-right: 5px; vertical-align: middle; }
+.co-dot {
+	display: inline-block;
+	width: 6px; height: 6px;
+	border-radius: 50%;
+	flex-shrink: 0;
+}
+.co-dot.kmb { background: #b3121b; }   /* 九巴紅 */
+.co-dot.ctb { background: #a8790a; }   /* 城巴琥珀（與 app 主題色一致） */
+
+/* 附近站 chip 的「兩家都有」樣式 */
+.chip.both {
+	background: var(--brand-soft);
+	color: var(--brand);
+	font-weight: 500;
+}
 
 .range-seg button {
 	flex: 1;

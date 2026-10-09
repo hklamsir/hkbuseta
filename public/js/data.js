@@ -417,7 +417,13 @@
 				gunzip(`data/${fileOf(files, 'ctb-stops.json.gz')}`),
 				gunzip(`data/${fileOf(files, 'ctb-routes.json.gz')}`)
 			]);
-			return buildStore(stopsRaw.v, stopsRaw.data, routesRaw.routes, routesRaw.routeStops, { updated });
+			const store = buildStore(stopsRaw.v, stopsRaw.data, routesRaw.routes, routesRaw.routeStops, { updated });
+			// ⚠️ cross = 跨公司配對表（M9），掛喺城巴檔案內。
+			//    為何掛城巴而非九巴：跨公司查詢係「以九巴為主體，補上城巴」，
+			//    而城巴檔案較細（90KB vs 165KB），掛細嗰個較合理。
+			//    九巴檔案保持不變 → 舊版 data.js 仍可讀。
+			store.cross = routesRaw.cross || null;
+			return store;
 		},
 
 		/* --- 遠端 ETA --- */
@@ -694,7 +700,181 @@
 		};
 	}
 
-	/* ============ ETA 處理 ============ */
+	/* ============ M9 跨公司合併 ============ */
+
+	/**
+	 * 跨公司配對（由 build 時預計算，見 docs/跨公司車站合併計劃書.md）。
+	 *
+	 * 兩張表回答**不同**問題（實測教訓，唔可互相取代）：
+	 *   cross.stops = 「這兩個站是同一個物理站嗎」→ 用嚟合併附近站列表
+	 *   cross.dirs  = 「這兩條線是同一條巴士嗎、方向字母如何對應」→ 用嚟合併 ETA 行
+	 *
+	 * ⚠️ build 產出的 stops 是**單向**（九巴 stopId → [城巴 stopId]），
+	 *    因為配對時每個城巴站只揀一個最佳九巴站（故一對多是「一個九巴站對多個城巴站」）。
+	 *    本層建雙向索引，令查詢邊個方向都得。
+	 */
+
+	/** 雙向站點配對索引：lazy 建、反向查詢都 O(1) */
+	let _crossIndex = null;
+
+	/**
+	 * 建立（並快取）雙向配對索引。
+	 * @param {object} store CTB 的 store（載入時已掛上 store.cross）
+	 */
+	function crossIndex(store) {
+		if (_crossIndex) return _crossIndex;
+		const cross = store?.cross;
+		if (!cross || !Array.isArray(cross.stops)) return null;
+
+		// 正向：九巴 id → [城巴 id]（build 已按 id 排序，直接沿用）
+		const fwd = new Map();
+		for (const [kmbId, ctbIds] of cross.stops) fwd.set(kmbId, ctbIds);
+
+		// 反向：城巴 id → [九巴 id]
+		const rev = new Map();
+		for (const [kmbId, ctbIds] of cross.stops) {
+			for (const c of ctbIds) {
+				let l = rev.get(c);
+				if (!l) rev.set(c, (l = []));
+				l.push(kmbId);
+			}
+		}
+
+		_crossIndex = {
+			fwd,
+			rev,
+			dirs: cross.dirs || {},
+			get size() { return fwd.size; }
+		};
+		return _crossIndex;
+	}
+
+	/** 清空快取（切換公司 / 重載資料時用） */
+	function resetCrossIndex() { _crossIndex = null; }
+
+	/**
+	 * 取得某站的所有「同物理站」配對 stop（含對面公司）。
+	 * 正反兩個方向都查得到。
+	 * @returns {Array<{co:string, stop:string}>} 可能是 0、1 或多個
+	 */
+	function getCrossStops(store, stopId) {
+		const idx = crossIndex(store);
+		if (!idx) return [];
+		const out = [];
+		const f = idx.fwd.get(stopId);
+		if (f) for (const id of f) out.push({ co: 'ctb', stop: id });
+		const r = idx.rev.get(stopId);
+		if (r) for (const id of r) out.push({ co: 'kmb', stop: id });
+		return out;
+	}
+
+	/**
+	 * 將兩家 adapter 合併為一個「查詢層」，令 UI 可以跨公司查一站。
+	 *
+	 * ⚠️ 關鍵設計：**不建新 store**，只在查詢時按 co 分派到對應 adapter/store。
+	 *    理由：兩家 gz schema 同構（buildStore 共用），合併反而要處理
+	 *    stop ID 命名空間衝突（九巴 16 字符 vs 城巴 6 位數字）。
+	 *
+	 * @param {Record<string,object>} stores { kmb: store, ctb: store }
+	 */
+	function crossQueryable(stores) {
+		const idx = crossIndex(stores.ctb);
+		return {
+			/** 該 adapter 是否有 cross 資料（無則 UI 退回單公司模式） */
+			hasCross: !!idx,
+
+			/**
+			 * 取得某 stop 的完整合併清單（自己 + 所有配對站）。
+			 * @param {string} co 主體公司
+			 * @param {string} stopId
+			 * @returns {Array<{co:string, stop:string}>}
+			 */
+			group(co, stopId) {
+				return [{ co, stop: stopId }, ...getCrossStops(stores.ctb, stopId)];
+			},
+
+			/**
+			 * 合併後某物理站的路線（跨公司）。
+			 * 去重 key = co|route|dir（svc 唔入 key：CTB 恆 1，
+			 * 且同一路線同一方向嘅多個 svc 顯示上亦應合併）。
+			 */
+			routesOf(co, stopId) {
+				const seen = new Map();
+				for (const { co: c, stop: s } of this.group(co, stopId)) {
+					const store = stores[c];
+					if (!store) continue;
+					for (const r of getStopRoutes(store, s)) {
+						const k = `${c}|${r.route}|${r.bound}`;
+						if (!seen.has(k)) seen.set(k, { ...r, co: c });
+					}
+				}
+				return [...seen.values()];
+			},
+
+			/**
+			 * 跨公司合併後的站序。
+			 *
+			 * 合併規則：先按各公司自己的站序取得 seq，
+			 * 再用「有 cross 配對」的關係合併重複站（同 stopId 在兩家都出現）。
+			 *
+			 * @returns {{stops:Array}|null} stops = [{stop, name, lat, lng, seq, cos:[{co,stop}]}]
+			 */
+			sequence(co, route, dir, svc) {
+				const primary = resolveRouteSeq(stores[co], route, dir, svc);
+				if (!primary) return null;
+
+				// 收集沿線所有站（含對面公司同物理站）
+				const byStopId = new Map();
+				for (const s of primary.stops) {
+					const partners = getCrossStops(stores.ctb, s.stop);
+					const entry = { stop: s.stop, name: s.name, lat: s.lat, lng: s.lng, seq: s.seq,
+						cos: [{ co, stop: s.stop }, ...partners] };
+					byStopId.set(s.stop, entry);
+					for (const p of partners) {
+						const ps = stores[p.co]?.stopById.get(p.stop);
+						if (ps && !byStopId.has(p.stop)) {
+							// 對面公司的站：seq 沿用主體站（同一物理位置）
+							byStopId.set(p.stop, {
+								stop: p.stop, name: ps.name, lat: ps.lat, lng: ps.lng,
+								seq: s.seq, cos: [p, { co, stop: s.stop }]
+							});
+						} else if (ps) {
+							byStopId.get(p.stop).cos.push(p);
+						}
+					}
+				}
+				return { stops: [...byStopId.values()].sort((a, b) => a.seq - b.seq) };
+			}
+		};
+	}
+
+	/**
+	 * 方向合併：把兩家同一走廊的 ETA 行合併為一行。
+	 *
+	 * 問題（實測）：路線 103 九巴 `I`→竹園邨、城巴 `O`→竹園 —— **字母相反但同一方向**。
+	 * 若按 dir 分組會顯示成兩行，用戶會誤以為兩條線。
+	 *
+	 * 對應表由 build 時預計算（cross.dirs），因實測 **無全域規律**
+	 *（54 條中相反 26 條、相同 28 條），唔可以喺 runtime 用規則推導。
+	 *
+	 * @param {object} idx crossIndex()
+	 * @param {string} route 路線號
+	 * @param {string} dir 本公司的方向字母
+	 * @param {string} co 本行屬於邊家公司
+	 * @returns {{key:string, dir:string}} 正規化後的方向（dir = KMB 字母空間）
+	 */
+	function normalizeDir(idx, route, dir, co) {
+		const m = idx?.dirs?.[route];
+		if (!m) return { key: `${co}|${dir}`, dir };
+		// 本行方向 = m.k（九巴）→ 用九巴字母做合併 key
+		// 對面公司那行（字母 = m.c）會被映射到同一個 key
+		if (co === 'kmb') {
+			return { key: m.k, dir: m.k };
+		}
+		// 本行是城巴：字母同 m.c 相同即代表同一走廊 → 映射去 m.k
+		return { key: m.c === dir ? m.k : dir, dir: m.c === dir ? m.k : dir };
+	}
+
 
 	/**
 	 * 清理並去重 ETA 記錄。
@@ -707,7 +887,9 @@
 		const out = [];
 		for (const r of rows) {
 			// 同名站的ETA 可能來自不同 stop ID，須納入去重鍵避免誤合
-			const key = `${r._stop || r.stop || ''}|${r.route}|${r.dir}|${r.seq}|${r.eta_seq}|${r.eta || ''}`;
+			// ⚠️ M9：_co（公司）亦要入去重鍵 —— 兩家的 stop ID 命名空間不同，
+			//    且同一路線同一方向兩家都有班次時必須保留兩行（由 UI 合併顯示）。
+			const key = `${r._co || ''}|${r._stop || r.stop || ''}|${r.route}|${r.dir}|${r.seq}|${r.eta_seq}|${r.eta || ''}`;
 			if (seen.has(key)) continue;
 			seen.add(key);
 			out.push({
@@ -720,7 +902,8 @@
 				ts: r.eta ? new Date(r.eta).getTime() : null,
 				rmk: r.rmk_tc || '',
 				dataTs: r.data_timestamp || null,
-				stop: r._stop || r.stop || null
+				stop: r._stop || r.stop || null,
+				co: r._co || null      // M9：來源公司（UI 用嚟顯示色點）
 			});
 		}
 		out.sort((a, b) => (a.dir === b.dir ? a.route.localeCompare(b.route, 'en') : a.dir.localeCompare(b.dir)) || a.etaSeq - b.etaSeq);
@@ -1022,6 +1205,8 @@
 		HK_BOUNDS, inHK, haversine, groupKey,
 		registerAdapter, getAdapter, listAdapters, TransportAdapters,
 		setCurrentStore, currentStore,
+		// M9 跨公司合併
+		crossIndex, resetCrossIndex, getCrossStops, crossQueryable, normalizeDir,
 		findNearbyStops, getStopRoutes, getRouteSequence,
 		findRouteIdx, resolveRouteSeq,
 		normalizeEta, formatEta, SERVICE_LABELS,

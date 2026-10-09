@@ -48,8 +48,11 @@ console.log(`     ${stamp}`);
 const mf = await (await fetch(`${BASE}/data/build-manifest.json`)).json();
 const nStops = Number(stamp.match(/([\d,]+) 個車站/)?.[1].replace(/,/g, '') || -1);
 const nRoutes = Number(stamp.match(/([\d,]+) 條路線/)?.[1].replace(/,/g, '') || -1);
-ok(nStops === mf.companies.kmb.stops, '車站數與 manifest 一致', `${nStops} vs ${mf.companies.kmb.stops}`);
-ok(nRoutes === mf.companies.kmb.routes, '路線數與 manifest 一致', `${nRoutes} vs ${mf.companies.kmb.routes}`);
+// M9：同時載入兩家（切換器已改為「顯示偏好」，唔會再只載一家）
+const expectStops = mf.companies.kmb.stops + mf.companies.ctb.stops;
+ok(nStops === expectStops, '車站數為兩家合計（與 manifest 一致）', `${nStops} vs ${expectStops}`);
+ok(/跨公司合併後/.test(stamp), '顯示跨公司合併後的站數', stamp.match(/跨公司合併後約 [\d,]+ 個站/)?.[0] || '(無)');
+ok(nRoutes === mf.companies.kmb.routes, '路線數（偏好公司）與 manifest 一致', `${nRoutes} vs ${mf.companies.kmb.routes}`);
 
 const dbInfo = await page.evaluate(() => {
 	const B = window.BusETA;
@@ -190,7 +193,8 @@ await page.click('#search-results .result');
 await page.waitForFunction(() => document.getElementById('page-nearby')?.classList.contains('active'), { timeout: 10000 });
 await page.waitForTimeout(500);
 const hsrCount = await page.textContent('#nb-count');
-ok(/14 個站/.test(hsrCount), '回歸規劃書實測值（14 個站，未因排序改變而減少）', hsrCount.trim());
+ok(/\d+ 個站/.test(hsrCount), '附近站已顯示站數（M9 合併後）', hsrCount.trim());
+ok(/合併後/.test(hsrCount), '顯示合併前後站數對比', hsrCount.trim());
 await page.click('#nb-back');
 await page.waitForTimeout(300);
 
@@ -283,7 +287,7 @@ await page.click('.result');
 await page.waitForSelector('.stop', { timeout: 10000 });
 await page.waitForTimeout(300);
 const countTxt = await page.textContent('#nb-count');
-ok(/14 個站/.test(countTxt), '預設 200m 顯示 14 個站（與規劃書實測一致）', countTxt.trim());
+ok(/\d+ 個站/.test(countTxt), '預設 200m 顯示站數', countTxt.trim());
 const stopNames = await page.$$eval('.stop .name .txt', (els) => els.map((e) => e.textContent.trim()));
 ok(stopNames.length > 0, '列表有站點', stopNames.join(' / '));
 const chipCount = await page.$$eval('.stop .chip', (els) => els.length);
@@ -435,14 +439,21 @@ ok(!rtEtas.some((t) => /-\d/.test(t)), '路線頁 ETA 無負數倒數', '');
 
 // 切換方向（零網絡請求）
 const beforeDir = await page.evaluate(() => window.__netCount);
-await page.evaluate(() => { const bs = document.querySelectorAll('#rt-dirs button'); bs[bs.length - 1]?.click(); });
+const dirBefore = await page.evaluate(() => [...document.querySelectorAll('#rt-dirs button')].findIndex((b) => b.classList.contains('on')));
+// ⚠️ M9：唔可以盲click「最後一個」方向 tab —— 可能啱啱就係當前（無變化）
+await page.evaluate(() => {
+	const bs = [...document.querySelectorAll('#rt-dirs button')];
+	const cur = bs.findIndex((b) => b.classList.contains('on'));
+	const target = bs.findIndex((b, k) => k !== cur);
+	if (target >= 0) bs[target].click();
+});
 await page.waitForTimeout(900);
 const afterDir = await page.evaluate(() => ({
 	net: window.__netCount,
 	dir: [...document.querySelectorAll('#rt-dirs button')].findIndex((b) => b.classList.contains('on')),
 	rows: document.querySelectorAll('#rt-list .seq-row').length
 }));
-ok(afterDir.dir >= 0 && afterDir.dir !== 0, '方向切換生效', `第 ${afterDir.dir + 1} 個`);
+ok(afterDir.dir >= 0 && afterDir.dir !== dirBefore, '方向切換生效', `第 ${dirBefore + 1} → 第 ${afterDir.dir + 1} 個`);
 ok(afterDir.rows > 0, '切換方向後站序仍完整', `${afterDir.rows} 行`);
 
 // 點另一個站 → ETA 換成該站
@@ -952,12 +963,12 @@ ok(/城巴/.test(await page.textContent('#app-sub')), '[CTB-1] 切換後公司�
 ok(/城巴/.test(await page.innerHTML('#data-attribution')), '[CTB-1] 資料來源歸屬已切換為城巴（data.gov.hk 條款要求）');
 ok((await page.getAttribute('#co-switch button.on', 'data-co')) === 'ctb', '切換器選中狀態正確');
 const ctbDb = await page.evaluate(() => ({
-	stops: window.__DB?.stopById?.size || 0,
-	routes: window.__DB?.routeList?.length || 0,
+	stops: window.__DBS.ctb?.stopById?.size || 0,
+	routes: window.__DBS.ctb?.routeList?.length || 0,
 	// 所有 CTB route 的 svc 應恆為 1
-	svcAllOne: (window.__DB?.routeList || []).every((r) => Number(r[2]) === 1),
+	svcAllOne: (window.__DBS.ctb?.routeList || []).every((r) => Number(r[2]) === 1),
 	// 每個 stop ID 應為 6 位 zero-padded 字串
-	stopIdShape: [...(window.__DB?.stopById?.keys() || [])].slice(0, 50).every((s) => /^\d{6}$/.test(s))
+	stopIdShape: [...(window.__DBS.ctb?.stopById?.keys() || [])].slice(0, 50).every((s) => /^\d{6}$/.test(s))
 }));
 ok(ctbDb.stops > 2000, '[CTB-1] CTB 離線資料已載入', `${ctbDb.stops} 站 / ${ctbDb.routes} 路線方向`);
 ok(ctbDb.svcAllOne, '[CTB-1] CTB 路線 svc 恆為 1（城巴無 service_type 概念）');
@@ -1005,7 +1016,7 @@ ok(mapTest.natText === '暫停服務', '[CTB-4] eta=null + 有 rmk → 顯示「
  *   而 route-stop/CTB/1/inbound（dir='I'）末站 = 中環 (港澳碼頭) = orig_tc。
  */
 const dirMap = await page.evaluate(() => {
-	const db = window.__DB;
+	const db = window.__DBS.ctb;
 	const find = (route, dir) => db.routeList.find((r) => r[0] === route && r[1] === dir);
 	return { o: find('1', 'O'), i: find('1', 'I') };
 });
@@ -1016,7 +1027,7 @@ ok(dirMap.o && dirMap.i && dirMap.o[3] !== dirMap.i[3], '[CTB-7] 兩方向終點
 /* [CTB-3] fetchStopEta 用 DPO batch 且帶 ?lang=zh-hant */
 const ctbStop = await page.evaluate(async () => {
 	// 取一個確定有城巴路線的站
-	const db = window.__DB;
+	const db = window.__DBS.ctb;
 	let stopId = null;
 	for (const [id, list] of db.stopRoutes) { if (list.length) { stopId = id; break; } }
 	const a = window.BusETA.getAdapter('ctb');
@@ -1033,7 +1044,7 @@ ok(ctbStop.sample && /[一-鿿]/.test(ctbStop.sample.dest_tc || ''), '[CTB-3] �
 
 /* [CTB-7b] 路線頁 UI：出站方向標題顯示正確終點 */
 const ctbRouteUI = await page.evaluate(async () => {
-	const db = window.__DB;
+	const db = window.__DBS.ctb;
 	// 搵一條兩方向都有的路線
 	const counts = {};
 	for (const [no, dir] of db.routeList) { counts[no] = counts[no] || {}; counts[no][dir] = (counts[no][dir] || 0) + 1; }
@@ -1096,22 +1107,29 @@ ok(coIsolate.kmbHidden, '[CTB-5b] 屏蔽 kmb 1|O 後，kmb 清單唔再顯示 1|
 ok(coIsolate.ctbHas1 && !coIsolate.ctbHidden, '[CTB-5b] 城巴 1|O 不受九巴屏蔽影響（hidden 清單按公司隔離）', `城巴計數 ${coIsolate.ctbCount}`);
 ok(coIsolate.hiddenKeys.includes('kmb|1|O') && !coIsolate.hiddenKeys.includes('ctb|1|O'),
 	'[CTB-5b] 屏蔽 key 含公司前綴');
-
-/* [CTB-6] 切換公司：狀態重置、無 console error */
+/* [CTB-6] 切換偏好：狀態重置、**零重載**（M9）、無 console error */
 const switchErrBefore = consoleErrors.length;
-// 切換前先確保已載入完成（上一段已等過）
+// ⚠️ M9：切換器已改為「顯示偏好」，切換**唔會**重載離線資料
+//（兩家都載入，實測 54ms）→ 唔可以再等 data-stamp 變化。
+const stampBefore = await page.textContent('#data-stamp');
+const tSwitch = Date.now();
 await page.click('#co-switch button[data-co="kmb"]');
-await page.waitForFunction(() => document.getElementById('data-stamp')?.textContent?.includes('6,7'), { timeout: 25000 });
-await page.waitForTimeout(800);
-const backState = await page.evaluate(() => ({
+await page.waitForTimeout(600);          // 只等 UI 重繪
+const switchMs = Date.now() - tSwitch;
+const backState = await page.evaluate((before) => ({
 	sub: document.getElementById('app-sub').textContent,
 	onCo: document.querySelector('#co-switch button.on')?.dataset.co,
 	// 切換後應回到搜尋頁（ETA/路線頁狀態已清）
 	searchActive: document.getElementById('page-search').classList.contains('active'),
 	etaActive: document.getElementById('page-eta').classList.contains('active'),
-	// 九巴 store 讀取應正常（切回九巴）
-	kmbStops: window.__DB?.stopById?.size || 0
-}));
+	kmbStops: window.__DBS?.kmb?.stopById?.size || 0,
+	ctbStops: window.__DBS?.ctb?.stopById?.size || 0,
+	// 關鍵：資料**無重載**（stamp 相同）
+	stampSame: document.getElementById('data-stamp').textContent === before
+}), stampBefore);
+ok(backState.stampSame, '[CTB-6] 切換偏好**零重載**（離線資料無重新載入）', `${switchMs}ms`);
+ok(backState.kmbStops > 6000 && backState.ctbStops > 2000,
+	'[CTB-6] 兩家資料同時在手（切換唔影響載入）', `kmb ${backState.kmbStops} / ctb ${backState.ctbStops}`);
 ok(backState.onCo === 'kmb', '[CTB-6] 切回九巴成功', backState.onCo);
 ok(/九巴/.test(backState.sub), '[CTB-6] 文案已切回九巴', backState.sub);
 ok(backState.searchActive && !backState.etaActive, '[CTB-6] 切換後回到搜尋頁，深層頁狀態已重置');
@@ -1142,19 +1160,149 @@ const raceRes = await page.evaluate(async () => {
 	return { requested: localStorage.getItem('buseta.company') };
 });
 // 等九巴資料確實載入完成
-await page.waitForFunction(() => document.getElementById('data-stamp')?.textContent?.includes('6,7'), { timeout: 25000 });
-await page.waitForTimeout(600);
+// ⚠️ M9：切換已改為「顯示偏好」零重載 → 唔會再等 data-stamp 變化，只等 UI 穩定
+await page.waitForTimeout(800);
 const raceFinal = await page.evaluate(() => ({
-	stops: window.__DB?.stopById?.size || 0,
+	stops: window.__DBS?.kmb?.stopById?.size || 0,
+	ctbStops: window.__DBS?.ctb?.stopById?.size || 0,
 	onCo: document.querySelector('#co-switch button.on')?.dataset.co,
-	// 九巴站 ID 為 16 字符；城巴為 6 位數字 → 用形狀驗證冇混雜
-	shapeOk: [...(window.__DB?.stopById?.keys() || [])].slice(0, 30).every((s) => s.length === 16)
+	// 九巴 stop ID 16 字符、城巴 6 位數字 → 形狀驗證兩家資料冇混雜
+	shapeOk: [...(window.__DBS?.kmb?.stopById?.keys() || [])].slice(0, 30).every((s) => s.length === 16),
+	ctbShapeOk: [...(window.__DBS?.ctb?.stopById?.keys() || [])].slice(0, 30).every((s) => /^\d{6}$/.test(s))
 }));
 ok(raceFinal.stops > 6000 && raceFinal.shapeOk,
 	'[CTB-6b] 快速連續切換後 DB 與 UI 一致（無舊公司資料覆蓋）',
 	`${raceFinal.stops} 站，stop ID 形狀正確=${raceFinal.shapeOk}`);
 
 
+/* ---------- 8e. M9 跨公司合併 ---------- */
+console.log('\n[8e] M9 跨公司車站合併');
+
+// 維景酒店：計劃書 §1 驗收場景（預置 localStorage，避開 Nominatim 限流）
+await page.addInitScript(() => {
+	localStorage.setItem('buseta.recent', JSON.stringify([
+		{ name: '維景酒店', lat: 22.31903, lng: 114.17567, at: Date.now() }
+	]));
+});
+await page.reload({ waitUntil: 'networkidle' });
+await page.waitForFunction(() => document.getElementById('data-stamp')?.textContent?.includes('車站'), { timeout: 25000 });
+await page.waitForSelector('#recent [data-r]', { timeout: 15000 });
+await page.click('#recent [data-r]');
+await page.waitForSelector('#nb-list .stop', { timeout: 20000 });
+await page.waitForTimeout(400);
+
+/* [XCO-1] 同時載入兩家 + cross 查詢層就緒 */
+const xco1 = await page.evaluate(() => {
+	const B = window.BusETA, DBS = window.__DBS;
+	return {
+		cos: Object.keys(DBS).sort(),
+		hasXQ: !!window.__XQ,
+		idxSize: B.crossIndex(DBS.ctb)?.size || 0,
+		dirs: Object.keys(B.crossIndex(DBS.ctb)?.dirs || {}).length,
+		stamp: document.getElementById('data-stamp').textContent
+	};
+});
+ok(xco1.cos.length === 2 && xco1.cos.includes('kmb') && xco1.cos.includes('ctb'),
+	'[XCO-1] 同時載入兩家離線資料', xco1.cos.join(' + '));
+ok(xco1.hasXQ, '[XCO-1] 跨公司查詢層已建立（cross 配對表已載入）');
+ok(xco1.idxSize > 1000, '[XCO-1] cross 站點配對表數量合理', `${xco1.idxSize} 組`);
+ok(xco1.dirs > 40, '[XCO-1] cross 方向對應表數量合理', `${xco1.dirs} 條`);
+ok(/跨公司合併後/.test(xco1.stamp), '[XCO-1] 顯示合併後站數',
+	xco1.stamp.match(/跨公司合併後約 [\d,]+ 個站/)?.[0] || '(無)');
+
+/* [XCO-2] 附近站：跨公司合併 + 同名行車位合併 */
+const xco2 = await page.evaluate(() => {
+	const rows = [...document.querySelectorAll('#nb-list .stop')];
+	const hotel = rows.find((r) => /維景酒店/.test(r.textContent));
+	return {
+		countText: document.getElementById('nb-count').textContent.replace(/\s+/g, ' ').trim(),
+		n: rows.length,
+		crossRows: rows.filter((r) => [...r.querySelectorAll('.tag')].some((t) => t.textContent.includes('兩家公司'))).length,
+		bothChips: rows.flatMap((r) => [...r.querySelectorAll('.chip.both')].map((c) => c.textContent)),
+		hotelStops: hotel ? JSON.parse(hotel.dataset.ids) : []
+	};
+});
+ok(/合併後/.test(xco2.countText), '[XCO-2] 顯示合併前後站數對比', xco2.countText);
+ok(xco2.crossRows > 0, '[XCO-2] 有站已跨公司合併（顯示「兩家公司」標籤）', `${xco2.crossRows} 項`);
+ok(xco2.bothChips.includes('103') || xco2.bothChips.includes('113'),
+	'[XCO-2] 兩家都有的路線有標記', xco2.bothChips.join(','));
+ok(xco2.hotelStops.length >= 2 && xco2.hotelStops.some((s) => s.co === 'kmb') && xco2.hotelStops.some((s) => s.co === 'ctb'),
+	'[XCO-2] 維景酒店已含兩家 stop（合併為一項）',
+	xco2.hotelStops.map((s) => `${s.co}:${s.stop}`).join(' + '));
+
+/* [XCO-3] ETA 頁：跨公司合併查詢 + 方向合併（核心驗收） */
+await page.click('#nb-list .stop');
+await page.waitForSelector('#eta-list .eta-row', { timeout: 35000 });
+await page.waitForTimeout(1200);
+const xco3 = await page.evaluate(() => {
+	const rows = [...document.querySelectorAll('#eta-list .eta-row')];
+	return {
+		n: rows.length,
+		multiCo: rows.filter((r) => [...r.querySelectorAll('.co-dot')].length === 2).map((r) => ({
+			no: r.querySelector('.route-no').textContent.trim(),
+			dots: [...r.querySelectorAll('.co-dot')].map((d) => d.className.replace('co-dot ', '')).sort()
+		})),
+		nos: rows.map((r) => r.querySelector('.route-no').textContent.trim())
+	};
+});
+ok(xco3.n > 5, '[XCO-3] ETA 頁有多行路線', `${xco3.n} 行`);
+const dupNos = xco3.nos.filter((v, k) => xco3.nos.indexOf(v) !== k);
+ok(dupNos.length === 0, '[XCO-3] 同一路線號只有一行（方向字母已合併）',
+	dupNos.length ? `重複：${dupNos.join(',')}` : '無重複');
+ok(xco3.multiCo.length > 0, '[XCO-3] 有行同時顯示兩家公司色點（方向合併成功）',
+	xco3.multiCo.map((r) => `${r.no}[${r.dots.join('+')}]`).join(' '));
+await page.screenshot({ path: join(SHOTS, '12-m9-eta-merged.png') });
+
+/* [XCO-4] 撞號路線不得合併 */
+const xco4 = await page.evaluate(() => {
+	const idx = window.BusETA.crossIndex(window.__DBS.ctb);
+	const collide = ['1', '2', '2A', '6', '7', '8', '8P'];
+	return { notInDirs: collide.filter((r) => !(r in idx.dirs)), checked: collide.length };
+});
+ok(xco4.notInDirs.length === xco4.checked,
+	'[XCO-4] 撞號路線全部不在方向對應表內（唔會錯誤合併）', `${xco4.notInDirs.length}/${xco4.checked} 條`);
+
+/* [XCO-5] 方向對應表：字母確實無全域規律 */
+const xco5 = await page.evaluate(() => {
+	const idx = window.BusETA.crossIndex(window.__DBS.ctb);
+	const pairs = Object.values(idx.dirs).map((d) => `${d.k}${d.c}`);
+	return {
+		mirrored: pairs.filter((p) => p === 'OI' || p === 'IO').length,
+		same: pairs.filter((p) => p === 'OO' || p === 'II').length,
+		d103: idx.dirs['103'], d113: idx.dirs['113']
+	};
+});
+ok(xco5.mirrored > 0 && xco5.same > 0, '[XCO-5] 方向字母確實無全域規律（相反與相同並存）',
+	`相反 ${xco5.mirrored} / 相同 ${xco5.same}`);
+ok(xco5.d103 && xco5.d103.k === 'O' && xco5.d103.c === 'I',
+	'[XCO-5] 路線 103 對應：九巴 O ↔ 城巴 I', JSON.stringify(xco5.d103));
+ok(xco5.d113 && xco5.d113.k === 'O' && xco5.d113.c === 'I',
+	'[XCO-5] 路線 113 對應：九巴 O ↔ 城巴 I', JSON.stringify(xco5.d113));
+
+/* [XCO-6] 切換偏好零重載 */
+const xco6 = await page.evaluate(() => {
+	const before = document.getElementById('data-stamp').textContent;
+	document.querySelector('#co-switch button[data-co="ctb"]').click();
+	return { before, after: document.getElementById('data-stamp').textContent };
+});
+ok(xco6.before === xco6.after, '[XCO-6] 切換偏好零重載（離線資料不變）');
+const xco6b = await page.evaluate(() => ({
+	onCo: document.querySelector('#co-switch button.on')?.dataset.co,
+	kmb: window.__DBS?.kmb?.stopById?.size || 0,
+	ctb: window.__DBS?.ctb?.stopById?.size || 0,
+	sub: document.getElementById('app-sub').textContent
+}));
+ok(xco6b.onCo === 'ctb' && /城巴/.test(xco6b.sub), '[XCO-6] 偏好已切到城巴（文案同步）', xco6b.sub);
+ok(xco6b.kmb > 6000 && xco6b.ctb > 2000, '[XCO-6] 兩家資料仍同時在手',
+	`kmb ${xco6b.kmb} / ctb ${xco6b.ctb}`);
+// ⚠️ 用 JS 觸發而非 page.click：切換後視角已回搜尋頁，切換器在深層頁不可見
+await page.evaluate(() => document.querySelector('#co-switch button[data-co="kmb"]').click());
+await page.waitForTimeout(500);
+ok(await page.evaluate(() => document.querySelector('#co-switch button.on')?.dataset.co === 'kmb'),
+	'[XCO-6] 已切回九巴偏好（避免影響後續測試）');
+
+/* ---------- 9. PWA ---------- */
+console.log('\n[9] PWA');
 const sw = await page.evaluate(async () => {
 	const r = await navigator.serviceWorker.getRegistration();
 	return { registered: !!r, scope: r?.scope || '' };
