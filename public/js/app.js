@@ -99,10 +99,7 @@
 			short: '九巴',
 			brand: '#b3121b',
 			dark: '#8d0e15',
-			soft: '#fdeef0',
-			attribution: '資料來源：運輸署「九龍巴士及龍運巴士路線實時到站數據」' +
-				'（<a href="https://data.gov.hk/tc-data/dataset/hk-td-tis_21-etakmb" target="_blank" rel="noopener">data.gov.hk</a>）' +
-				' · 知識產權屬九巴及龍運'
+			soft: '#fdeef0'
 		},
 		ctb: {
 			label: '城巴及新巴',
@@ -110,13 +107,15 @@
 			// 城巴黃。用深琥珀色而非純黃：純 #FFD100 對比度不足，白字睇唔清
 			brand: '#a8790a',
 			dark: '#7d5606',
-			soft: '#fdf6e3',
-			attribution: '資料來源：運輸署「城市巴士路線實時到站數據」' +
-				'（<a href="https://data.gov.hk/tc-data/dataset/hk-td-tis_21-citybus" target="_blank" rel="noopener">data.gov.hk</a>）' +
-				' · 知識產權屬城巴' +
-				'<br><span style="opacity:.8">2023 年專營權合併後，原新巴路線已納入城巴資料</span>'
+			soft: '#fdf6e3'
 		}
 	};
+	// ⚠️ data.gov.hk 開放數據條款要求標明資料來源與知識產權。
+	//    兩家已合併顯示 → 來源合併為精簡兩行，避免重複「資料來源：運輸署」的累贅字句。
+	const ATTRIBUTION =
+		'資料來源：運輸署實時到站數據 · 九巴及龍運、城巴' +
+		'（<a href="https://data.gov.hk/tc-data/dataset/hk-td-tis_21-etakmb" target="_blank" rel="noopener">data.gov.hk</a>）' +
+		'<br>知識產權屬九巴及龍運、城巴';
 	function brand() { return BRAND[adapter.id] || BRAND[DEFAULT_CO]; }
 
 	/**
@@ -150,7 +149,7 @@
 		const meta = document.querySelector('meta[name="theme-color"]');
 		if (meta) meta.setAttribute('content', br.brand);
 		const attr = $('data-attribution');
-		if (attr) attr.innerHTML = BRAND.kmb.attribution + '<br>' + BRAND.ctb.attribution;
+		if (attr) attr.innerHTML = ATTRIBUTION;
 	}
 
 	/**
@@ -555,7 +554,6 @@
 					</span>
 				</button>`).join('')
 				: f.map((x) => `<button class="result" data-f="${esc(x.stop)}" data-co="${esc(x.co || DEFAULT_CO)}">
-					${coDot(x.co)}
 					<svg style="width:18px;height:18px;fill:#f5a623;stroke:#f5a623;flex-shrink:0"><use href="#i-star"/></svg>
 					<span class="body"><span class="name">${esc(x.name)}</span></span>
 					<span class="row-del" data-unfav="${esc(x.stop)}" data-co="${esc(x.co || DEFAULT_CO)}" role="button" aria-label="移除 ${esc(x.name)}" title="移除">

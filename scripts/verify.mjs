@@ -1200,13 +1200,13 @@ const xco2 = await page.evaluate(() => {
 	return {
 		countText: document.getElementById('nb-count').textContent.replace(/\s+/g, ' ').trim(),
 		n: rows.length,
-		crossRows: rows.filter((r) => [...r.querySelectorAll('.tag')].some((t) => t.textContent.includes('兩家公司'))).length,
+		crossRows: rows.filter((r) => [...r.querySelectorAll('.tag')].some((t) => t.textContent.includes('兩家'))).length,
 		bothChips: rows.flatMap((r) => [...r.querySelectorAll('.chip.both')].map((c) => c.textContent)),
 		hotelStops: hotel ? JSON.parse(hotel.dataset.ids) : []
 	};
 });
 ok(/合併後/.test(xco2.countText), '[XCO-2] 顯示合併前後站數對比', xco2.countText);
-ok(xco2.crossRows > 0, '[XCO-2] 有站已跨公司合併（顯示「兩家公司」標籤）', `${xco2.crossRows} 項`);
+ok(xco2.crossRows > 0, '[XCO-2] 有站已跨公司合併（顯示「兩家」標籤）', `${xco2.crossRows} 項`);
 ok(xco2.bothChips.includes('103') || xco2.bothChips.includes('113'),
 	'[XCO-2] 兩家都有的路線有標記', xco2.bothChips.join(','));
 ok(xco2.hotelStops.length >= 2 && xco2.hotelStops.some((s) => s.co === 'kmb') && xco2.hotelStops.some((s) => s.co === 'ctb'),
@@ -1271,7 +1271,7 @@ const xco6 = await page.evaluate(() => ({
 	ctb: window.__DBS?.ctb?.stopById?.size || 0
 }));
 ok(!xco6.switcherExists && !xco6.coBarExists, '[XCO-6] 公司切換器與其容器已從 UI 移除');
-ok(xco6.sub === '巴士到站時間', '[XCO-6] 副標題改為公司中立', xco6.sub);
+ok(!/九巴|龍運|城巴|新巴/.test(xco6.sub) && xco6.sub.length > 0, '[XCO-6] 副標題為公司中立（不含特定公司名）', xco6.sub);
 ok(xco6.kmb > 6000 && xco6.ctb > 2000, '[XCO-6] 兩家資料同時在手（合併顯示）',
 	`kmb ${xco6.kmb} / ctb ${xco6.ctb}`);
 

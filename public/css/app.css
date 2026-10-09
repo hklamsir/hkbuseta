@@ -237,7 +237,7 @@ body {
 	flex-shrink: 0;
 }
 .co-dot.kmb { background: #b3121b; }   /* 九巴紅 */
-.co-dot.ctb { background: #a8790a; }   /* 城巴琥珀（與 app 主題色一致） */
+.co-dot.ctb { background: #f5c518; }   /* 城巴淺黃（較原琥珀亮，與九巴深紅明顯區分） */
 
 /* 附近站 chip 的「兩家都有」樣式 */
 .chip.both {
