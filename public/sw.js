@@ -23,7 +23,7 @@
  */
 
 /** 殼層版本戳：純內容 hash（無日期）。改殼層檔案後跑 scripts/bump-sw.mjs 自動更新 */
-const BUILD_STAMP = 'a59772da';
+const BUILD_STAMP = '16136598';
 
 /** 參與版本 hash 的殼層檔案（改動任何一個都會令快取名改變） */
 const VERSIONED = [
@@ -103,6 +103,8 @@ const SHELL = [
 	'./icons/icon.svg',
 	'./data/stops.json.gz',
 	'./data/routes.json.gz',
+	'./data/ctb-stops.json.gz',
+	'./data/ctb-routes.json.gz',
 	'./data/build-manifest.json'
 ];
 
@@ -172,11 +174,18 @@ self.addEventListener('fetch', (e) => {
 /**
  * ETA 請求：Network First，失敗回退到快取的最後一次成功回應。
  * 用戶在無網絡但曾載入過該站時，仍能看到上一次的到站時間（附過時提示）。
+ *
+ * ⚠️ host 白名單必須涵蓋所有營辦商的 ETA host，否則該公司的 ETA 離線回退會靜靜失效：
+ *   · data.etabus.gov.hk→ 九巴／龍運 stop-eta / eta
+ *   · rt.data.gov.hk         → 城巴／新巴原生 /eta + DPO batch/stop-eta
+ * 新增 adapter 時記得同步此處（見CTB-adapter 計劃書 RC4）。
  */
+const ETA_HOSTS = ['data.etabus.gov.hk', 'rt.data.gov.hk'];
+
 self.addEventListener('fetch', (e) => {
 	const req = e.request;
 	const url = new URL(req.url);
-	if (url.hostname !== 'data.etabus.gov.hk') return;
+	if (!ETA_HOSTS.includes(url.hostname)) return;
 
 	e.respondWith(
 		fetch(req)

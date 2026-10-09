@@ -224,6 +224,47 @@ body {
 	gap: 10px;
 }
 .range-seg { display: flex; background: var(--bg); border-radius: 8px; padding: 2px; flex: 1; }
+
+/* 公司切換器（M8 多營辦商）
+   只出現喺搜尋頁頂部。用 segmented control 樣式（與 .range-seg 一致嘅視覺語言），
+   令用戶一眼認出「呢個係可點擊嘅分頁」而非裝飾文字。 */
+.co-bar {
+	padding: 10px 14px 2px;
+	background: var(--surface);
+}
+.co-switch {
+	display: flex;
+	background: var(--bg);
+	border-radius: 8px;
+	padding: 2px;
+	gap: 2px;
+}
+.co-switch button {
+	flex: 1;
+	border: 0;
+	background: none;
+	padding: 8px 6px;
+	font-size: 13px;
+	font-family: inherit;
+	border-radius: 6px;
+	cursor: pointer;
+	color: var(--text-2);
+	font-weight: 500;
+	transition: background .15s, color .15s;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.co-switch button.on { background: var(--brand); color: #fff; }
+/* 觸控目標至少 44px 高（WCAG 2.5.5 / iOS HIG）—— 容器 padding 已貢獻 4px */
+@media (pointer: coarse) {
+	.co-switch button { padding: 12px 6px; }
+}
+.co-switch button:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+
+/* 切換公司期間的載入提示（佔位避免版面跳動） */
+#co-loading:not(:empty) { padding: 12px 14px 4px; }
+
 .range-seg button {
 	flex: 1;
 	border: 0;

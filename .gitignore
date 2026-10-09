@@ -21,6 +21,10 @@ screenshots/
 .idea/
 *.swp
 
+# build-data.mjs 的 CTB 車站快取（~2600 筆，僅為加速本地重跑；
+# 站點資料極少變，可跨 build 複用。正式資料仍每次由 /stop 抓取校驗）
+.build-cache/
+
 # 實測原始 JSON（4.4 MB，由 scripts/ 重新抓即可）
 # 只保留官方 PDF 規格作參考
 docs/reference/*.json

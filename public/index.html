@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#b3121b">
-<meta name="description" content="輸入地標，尋找附近九巴及龍運巴士站與實時到站時間">
+<meta name="description" content="輸入地標，尋找附近巴士站與實時到站時間，覆蓋九巴及龍運、城巴及新巴">
 <title>BusETA — 巴士到站時間</title>
 <link rel="manifest" href="manifest.json">
 <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
@@ -38,8 +38,14 @@
 	<!-- ① 搜尋頁 -->
 	<section class="page active" id="page-search">
 		<header class="topbar">
-			<h1>BusETA<span class="sub">九巴及龍運巴士到站時間</span></h1>
+			<h1>BusETA<span class="sub" id="app-sub">九巴及龍運到站時間</span></h1>
 		</header>
+
+		<!-- 公司切換器：只放搜尋頁（深層頁切換需清多一倍狀態，見計劃書 Phase 3） -->
+		<div class="co-bar">
+			<div class="co-switch" id="co-switch" role="group" aria-label="選擇巴士公司"></div>
+		</div>
+		<div id="co-loading"></div>
 
 		<div class="search-box">
 			<div class="search-field" id="search-field">
@@ -68,10 +74,8 @@
 				<span id="net-state"></span>
 			</div>
 			<div style="margin-top:8px">
-				資料來源：運輸署「九龍巴士及龍運巴士路線實時到站數據」<br>
-				<a href="https://data.gov.hk/tc-data/dataset/hk-td-tis_21-etakmb" target="_blank" rel="noopener">data.gov.hk</a>
-				· 知識產權屬九巴及龍運
-			</div>
+			<div id="data-attribution" style="font-size:11px;color:var(--text-3);line-height:1.6"></div>
+		</div>
 		</div>
 	</section>
 
