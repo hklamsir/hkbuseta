@@ -852,7 +852,7 @@
 
 			const ids = members.map((s) => ({ co: s.co, stop: s.stop }));
 			const tags = [];
-			if (cos.length > 1) tags.push('<span class="tag">兩家公司</span>');
+			if (cos.length > 1) tags.push('<span class="tag">兩家巴士公司</span>');
 			if (posCount > 1) tags.push(`<span class="tag gray">${posCount} 個行車位</span>`);
 
 			return `<button class="stop" data-ids="${esc(JSON.stringify(ids))}">
