@@ -851,11 +851,13 @@ const copyTest = await page.evaluate(() => {
 	const link = document.getElementById('clear-data');
 	return {
 		text: link.textContent.trim(),
-		sub: link.parentElement.querySelector('div')?.textContent.trim() || ''
+		sub: link.querySelector('.mi-desc')?.textContent.trim() || '',
+		inMenu: !!link.closest('#menu-panel')
 	};
 });
 ok(/清除本機所有資料/.test(copyTest.text), '清除連結文案已更新', copyTest.text);
 ok(/只存於此裝置/.test(copyTest.sub), '補充說明資料只存於本機', copyTest.sub.slice(0, 30));
+ok(copyTest.inMenu, '清除連結已搬入漢堡選單（頁尾只留離線資料＋版本號）');
 
 // 清除確認框列出實際筆數
 const confirmCopy = await page.evaluate(() => {
@@ -879,6 +881,126 @@ await page.evaluate(() => {
 	document.getElementById('q').dispatchEvent(new Event('input', { bubbles: true }));
 });
 await page.waitForTimeout(700);
+
+/* ---------- 8b-5. 漢堡選單 + 最近搜尋只顯示 3 個 ---------- */
+console.log('\n[8b-5] 漢堡選單與最近搜尋上限（2026-10-12）');
+
+// ① 頁尾精簡：只剩離線資料與版本號
+const footItems = await page.evaluate(() => ({
+	stamp: !!document.getElementById('data-stamp'),
+	ver: !!document.getElementById('app-version'),
+	clearInFoot: !!document.getElementById('clear-data')?.closest('.foot'),
+	netInFoot: !!document.getElementById('net-state')?.closest('.foot'),
+	attrInFoot: !!document.getElementById('data-attribution')?.closest('.foot')
+}));
+ok(footItems.stamp && footItems.ver, '頁尾保留離線資料與版本號');
+ok(!footItems.clearInFoot && !footItems.netInFoot && !footItems.attrInFoot,
+	'清除資料／網絡狀態／資料來源已搬離頁尾');
+
+// ② 漢堡按鈕開合
+await page.click('#menu-btn');
+const menuOpen = await page.evaluate(() => ({
+	open: !document.getElementById('menu-panel').hidden,
+	expanded: document.getElementById('menu-btn').getAttribute('aria-expanded'),
+	hasClear: !!document.getElementById('clear-data')?.closest('#menu-panel'),
+	hasNet: !!document.getElementById('net-state')?.closest('#menu-panel'),
+	hasAttr: !!document.getElementById('data-attribution')?.closest('#menu-panel'),
+	attrFilled: /資料來源/.test(document.getElementById('data-attribution').textContent)
+}));
+ok(menuOpen.open && menuOpen.expanded === 'true', '漢堡按鈕開啟選單');
+ok(menuOpen.hasClear && menuOpen.hasNet && menuOpen.hasAttr,
+	'選單包含清除資料／網絡狀態／資料來源');
+ok(menuOpen.attrFilled, '選單內資料來源文案已填入（applyBranding 生效）');
+await page.screenshot({ path: join(SHOTS, '12-hamburger-menu.png') });
+
+// ③ 撳選單外面自動收起（撳 topbar 標題：面板只會遮蓋下方內容，撳頂欄等於外面）
+await page.click('.topbar h1');
+const menuClosed = await page.evaluate(() => document.getElementById('menu-panel').hidden);
+ok(menuClosed, '撳選單外面自動收起');
+
+// ④ 最近搜尋：5 筆 → 只顯示最近 3 個 + 「更多…」
+await page.evaluate(() => {
+	const B = window.BusETA;
+	B.store.recent.clear();
+	for (const n of ['甲', '乙', '丙', '丁', '戊']) {
+		B.store.recent.add({ name: '測試' + n, lat: 22.3, lng: 114.2 });
+	}
+	const q = document.getElementById('q');
+	q.value = ''; q.dispatchEvent(new Event('input', { bubbles: true }));
+});
+await page.waitForTimeout(700);
+const recCollapsed = await page.evaluate(() => ({
+	rows: document.querySelectorAll('#recent [data-r]').length,
+	names: [...document.querySelectorAll('#recent [data-r] .name')].map((e) => e.textContent),
+	more: !!document.querySelector('#recent [data-rmore]'),
+	moreText: document.querySelector('#recent [data-rmore] .name')?.textContent || ''
+}));
+ok(recCollapsed.rows === 3, '最近搜尋只顯示 3 個（共 5 筆）', recCollapsed.names.join(' / '));
+ok(recCollapsed.more, '超過上限顯示「更多…」列', recCollapsed.moreText);
+ok(recCollapsed.names[0] === '測試戊' && recCollapsed.names[2] === '測試丙',
+	'顯示的是最近 3 個（最新在前）');
+
+// ⑤ 展開／收起
+await page.click('#recent [data-rmore]');
+await page.waitForTimeout(300);
+const recExpanded = await page.evaluate(() => ({
+	rows: document.querySelectorAll('#recent [data-r]').length,
+	label: document.querySelector('#recent [data-rmore] .name')?.textContent || ''
+}));
+ok(recExpanded.rows === 5, '撳「更多…」展開全部 5 個', `${recExpanded.rows} 列`);
+ok(/收起/.test(recExpanded.label), '展開後標籤變「收起」');
+await page.screenshot({ path: join(SHOTS, '13-recent-expanded.png') });
+
+await page.click('#recent [data-rmore]');
+await page.waitForTimeout(300);
+const recRecollapsed = await page.evaluate(() => document.querySelectorAll('#recent [data-r]').length);
+ok(recRecollapsed === 3, '再撳「收起」返回 3 個');
+
+// ⑥ 3 個以內唔出現「更多…」
+await page.evaluate(() => {
+	const B = window.BusETA;
+	B.store.recent.clear();
+	for (const n of ['甲', '乙', '丙']) {
+		B.store.recent.add({ name: '測試' + n, lat: 22.3, lng: 114.2 });
+	}
+	document.getElementById('q').dispatchEvent(new Event('input', { bubbles: true }));
+});
+await page.waitForTimeout(600);
+const rec3 = await page.evaluate(() => ({
+	rows: document.querySelectorAll('#recent [data-r]').length,
+	more: !!document.querySelector('#recent [data-rmore]')
+}));
+ok(rec3.rows === 3 && !rec3.more, '3 個以內不出現「更多…」列');
+
+// ⑦ 展開狀態下刪除仍正常（逐項刪除 + 重繪後保持展開）
+await page.evaluate(() => {
+	const B = window.BusETA;
+	B.store.recent.clear();
+	for (const n of ['甲', '乙', '丙', '丁', '戊']) {
+		B.store.recent.add({ name: '測試' + n, lat: 22.3, lng: 114.2 });
+	}
+	document.getElementById('q').dispatchEvent(new Event('input', { bubbles: true }));
+});
+await page.waitForTimeout(600);
+await page.click('#recent [data-rmore]');   // 展開
+await page.waitForTimeout(200);
+await page.click('#recent [data-r="3"] [data-del]');   // 刪「測試乙」（展開後索引 3）
+await page.waitForTimeout(400);
+const recDelExpanded = await page.evaluate(() => ({
+	rows: document.querySelectorAll('#recent [data-r]').length,
+	stored: window.BusETA.store.recent.load().map((x) => x.name)
+}));
+ok(recDelExpanded.rows === 4 && !recDelExpanded.stored.includes('測試乙'),
+	'展開狀態下逐項刪除正常（刪後仍展開）', recDelExpanded.stored.join(' / '));
+
+// 清理（順手收起選單，避免影響後續測試）
+await page.evaluate(() => {
+	window.BusETA.store.recent.clear();
+	const panel = document.getElementById('menu-panel');
+	if (panel && !panel.hidden) document.getElementById('menu-btn').click();
+	document.getElementById('q').dispatchEvent(new Event('input', { bubbles: true }));
+});
+await page.waitForTimeout(500);
 
 /* ---------- 8b-4. 開機 race condition（DB 未載入時 renderRecent） ---------- */
 console.log('\n[8b-4] 開機時序：DB 未載入不可拋錯');

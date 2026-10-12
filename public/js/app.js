@@ -112,6 +112,7 @@
 	};
 	// ⚠️ data.gov.hk 開放數據條款要求標明資料來源與知識產權。
 	//    兩家已合併顯示 → 來源合併為精簡兩行，避免重複「資料來源：運輸署」的累贅字句。
+	//    （顯示位置：搜尋頁漢堡選單，見 index.html 的 #menu-panel）
 	const ATTRIBUTION =
 		'資料來源：運輸署實時到站數據 · 九巴及龍運、城巴' +
 		'（<a href="https://data.gov.hk/tc-data/dataset/hk-td-tis_21-etakmb" target="_blank" rel="noopener">data.gov.hk</a>）' +
@@ -164,7 +165,7 @@
 	 * 為何唔直接顯示 buildId：buildId 係**離線資料**的內容 hash，每日資料更新就會變，
 	 * 用戶會誤以為係新版 app。版本號必須只隨**程式碼**改動而變。
 	 */
-	const VERSION_FALLBACK = '1.2.0';
+	const VERSION_FALLBACK = '1.3.0';
 	let APP_VERSION = VERSION_FALLBACK;
 
 	function renderVersion() {
@@ -339,6 +340,7 @@
 		const target = page.startsWith('page-') ? page : 'page-' + page;
 		for (const p of document.querySelectorAll('.page')) p.classList.toggle('active', p.id === target);
 		window.scrollTo(0, 0);
+		closeMenu();   // 選單只屬搜尋頁：切頁時收埋，唔會殘留喺其他頁面
 		if (!opt || opt.history !== false) {
 			try {
 				history.pushState({ [BUSETA_KEY]: 1, page: target }, '');
@@ -634,6 +636,14 @@
 	/** 分頁狀態：'route' = 常搭路線、'stop' = 常到車站 */
 	let favTab = 'route';
 
+	/**
+	 * 最近搜尋：摺疊時只顯示最近 N 個（2026-10-12 用戶要求）。
+	 * 其餘收入「更多…」列，展開後可逐項刪除；資料層仍保留最多 10 筆。
+	 */
+	const RECENT_SHOW_MAX = 3;
+	/** 是否已展開（撳「更多…」後為 true；跨 renderRecent 重繪保留） */
+	let recentExpanded = false;
+
 	function renderRecent() {
 		const r = B.store.recent.load();
 		// ⚠️ M9：切換器已移除 → 收藏／常搭路線**跨公司顯示**（loadAll），
@@ -663,18 +673,28 @@
 			}));
 		const favRoutes = [...pinned, ...auto];
 
-		// 最近搜尋（可逐項刪除）
-		if (r.length) {
-			html += `<div class="section"><div class="section-title">最近搜尋</div><div class="card">` +
-				r.map((x, i) => `<button class="result" data-r="${i}">
-					<svg style="width:18px;height:18px;stroke:var(--text-3);fill:none;stroke-width:2;flex-shrink:0"><use href="#i-clock"/></svg>
-					<span class="body"><span class="name">${esc(x.name)}</span></span>
-					<span class="row-del" data-del="${esc(x.name)}" role="button" aria-label="刪除 ${esc(x.name)}" title="刪除">
-						<svg><use href="#i-x"/></svg>
-					</span>
-				</button>`).join('') +
-				'</div></div>';
-		}
+	// 最近搜尋（可逐項刪除）
+	if (r.length) {
+		// 只顯示最近 RECENT_SHOW_MAX 個，超過嘅收入「更多…」列（減少首頁雜訊）
+		const collapsed = !recentExpanded && r.length > RECENT_SHOW_MAX;
+		const shown = collapsed ? r.slice(0, RECENT_SHOW_MAX) : r;
+		html += `<div class="section"><div class="section-title">最近搜尋</div><div class="card">` +
+			shown.map((x, i) => `<button class="result" data-r="${i}">
+				<svg style="width:18px;height:18px;stroke:var(--text-3);fill:none;stroke-width:2;flex-shrink:0"><use href="#i-clock"/></svg>
+				<span class="body"><span class="name">${esc(x.name)}</span></span>
+				<span class="row-del" data-del="${esc(x.name)}" role="button" aria-label="刪除 ${esc(x.name)}" title="刪除">
+					<svg><use href="#i-x"/></svg>
+				</span>
+			</button>`).join('') +
+			// 超過上限才顯示「更多…」；展開後變「收起」（箭咀旋轉 180°）
+			(r.length > RECENT_SHOW_MAX
+				? `<button class="result more-row${recentExpanded ? ' expanded' : ''}" data-rmore>
+					<svg class="chev"><use href="#i-chev-down"/></svg>
+					<span class="body"><span class="name">${recentExpanded ? '收起' : `更多…（共 ${r.length} 項）`}</span></span>
+				</button>`
+				: '') +
+			'</div></div>';
+	}
 
 		// 常搭路線 / 常到車站：同一個分頁容器，避免三個區塊同時出現過於擠迫
 		if (favRoutes.length || f.length) {
@@ -760,12 +780,17 @@
 			const x = r[+b.dataset.r];
 			openNearby({ name: x.name, lat: x.lat, lng: x.lng });
 		}));
-		$('recent').querySelectorAll('[data-del]').forEach((b) => b.addEventListener('click', (e) => {
-			e.stopPropagation();
-			B.store.recent.remove(b.dataset.del);
-			renderRecent();
-			toast('已刪除');
-		}));
+	$('recent').querySelectorAll('[data-del]').forEach((b) => b.addEventListener('click', (e) => {
+		e.stopPropagation();
+		B.store.recent.remove(b.dataset.del);
+		renderRecent();
+		toast('已刪除');
+	}));
+	// 「更多…」展開／收起（只影響顯示筆數，資料層唔變）
+	$('recent').querySelector('[data-rmore]')?.addEventListener('click', () => {
+		recentExpanded = !recentExpanded;
+		renderRecent();
+	});
 		$('recent').querySelectorAll('[data-f]').forEach((b) => b.addEventListener('click', (e) => {
 			if (e.target.closest('[data-unfav]')) return;
 			// ⚠️ 跨公司顯示後，stop ID 可能兩家都有 → 必須連 co 一起比對
@@ -818,6 +843,44 @@
 		B.clearGeoCache();
 		renderRecent();
 		toast('已清除本機資料');
+		closeMenu();   // 危險操作完成後收埋選單
+	});
+
+	/* ============ 漢堡選單（2026-10-12：頁尾項目搬入） ============ */
+
+	/**
+	 * 頁尾原本有：離線資料統計 / 清除本機資料 / 網絡狀態 / 資料來源 / 版本號。
+	 * 用戶要求精簡首頁 → 除「離線資料」與「版本號」外，全部收入搜尋頁嘅漢堡選單。
+	 *
+	 * ⚠️ 元素 ID 保持不變（clear-data / net-state / data-attribution）——
+	 *    既有接線（clear-data click、updateNetState、applyBranding）唔使改。
+	 */
+	function openMenu() {
+		$('menu-panel').hidden = false;
+		$('menu-btn').setAttribute('aria-expanded', 'true');
+	}
+	function closeMenu() {
+		const panel = $('menu-panel');
+		if (panel) panel.hidden = true;
+		const btn = $('menu-btn');
+		if (btn) btn.setAttribute('aria-expanded', 'false');
+	}
+	function toggleMenu() {
+		if ($('menu-panel').hidden) openMenu(); else closeMenu();
+	}
+
+	$('menu-btn').addEventListener('click', (e) => {
+		e.stopPropagation();   // 唔使下面個 document 收埋器同一次點擊又關閉
+		toggleMenu();
+	});
+	// 撳任何地方（漢堡按鈕已 stopPropagation 唔會到呢度）→ 收起。
+	// 面板會遮蓋部份內容（搜尋框），但「點任何一處就收」嘅規則最可預測，
+	// 用戶唔會點撃靜靜落空。
+	document.addEventListener('click', () => {
+		if (!$('menu-panel').hidden) closeMenu();
+	});
+	document.addEventListener('keydown', (e) => {
+		if (e.key === 'Escape' && !$('menu-panel').hidden) closeMenu();
 	});
 
 	/* ============ M3 附近站列表 ============ */

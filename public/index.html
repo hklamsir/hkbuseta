@@ -31,6 +31,10 @@
 	<symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></symbol>
 	<symbol id="i-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
 	<symbol id="i-route" viewBox="0 0 24 24"><circle cx="6" cy="19" r="2.5"/><circle cx="18" cy="5" r="2.5"/><path d="M8.5 19H14a4 4 0 0 0 4-4v-5.5"/></symbol>
+	<symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
+	<symbol id="i-chev-down" viewBox="0 0 24 24"><path d="M5 9l7 7 7-7"/></symbol>
+	<symbol id="i-wifi" viewBox="0 0 24 24"><path d="M4.5 9.8a11 11 0 0 1 15 0M7.6 13a6.5 6.5 0 0 1 8.8 0M10.7 16.2a2.8 2.8 0 0 1 2.6 0"/><circle cx="12" cy="18.8" r="1.1"/></symbol>
+	<symbol id="i-doc" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h6"/></symbol>
 </svg>
 
 <div id="app">
@@ -39,6 +43,36 @@
 	<section class="page active" id="page-search">
 		<header class="topbar">
 			<h1>HK Bus ETA<span class="sub" id="app-sub">香港巴士到站時間</span></h1>
+			<div class="menu-wrap">
+				<button class="icon-btn" id="menu-btn" aria-label="開啟選單" aria-expanded="false" aria-controls="menu-panel" title="選單">
+					<svg><use href="#i-menu"/></svg>
+				</button>
+			</div>
+			<!-- 漢堡選單：由頁尾搬入嘅項目（離線資料與版本號留喺頁尾）。
+			     直接放喺 .topbar 之下 → 以 sticky topbar 做定位基準，top:100% 即底邊 -->
+			<div class="menu-panel" id="menu-panel" hidden>
+				<div class="menu-item">
+					<svg class="mi-ico"><use href="#i-wifi"/></svg>
+					<div class="mi-body">
+						<div class="mi-title">網絡狀態</div>
+						<div class="mi-desc"><span id="net-state"></span></div>
+					</div>
+				</div>
+				<div class="menu-item">
+					<svg class="mi-ico"><use href="#i-doc"/></svg>
+					<div class="mi-body">
+						<div class="mi-title">資料來源</div>
+						<div class="mi-desc" id="data-attribution"></div>
+					</div>
+				</div>
+				<button class="menu-item danger" id="clear-data">
+					<svg class="mi-ico"><use href="#i-trash"/></svg>
+					<div class="mi-body">
+						<div class="mi-title">清除本機所有資料</div>
+						<div class="mi-desc">搜尋記錄、常搭路線、常到車站與地標緩存，全部只存於此裝置</div>
+					</div>
+				</button>
+			</div>
 		</header>
 
 
@@ -59,18 +93,6 @@
 
 		<div class="foot">
 			<div id="data-stamp"></div>
-			<div style="margin-top:8px">
-				<span class="link" id="clear-data">清除本機所有資料</span>
-				<div style="font-size:11px;color:var(--text-3);margin-top:2px">
-					搜尋記錄、常搭路線、常到車站與地標緩存，全部只存於此裝置
-				</div>
-			</div>
-			<div style="margin-top:10px">
-				<span id="net-state"></span>
-			</div>
-			<div style="margin-top:8px">
-			<div id="data-attribution" style="font-size:11px;color:var(--text-3);line-height:1.6"></div>
-		</div>
 			<!-- 版本號：讓用戶一眼分辨新版／舊版（單一真相來源 = manifest.json 的 version） -->
 			<div id="app-version" class="ver"></div>
 		</div>

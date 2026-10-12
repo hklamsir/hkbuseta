@@ -116,6 +116,55 @@ body {
 .icon-btn.spin svg { animation: spin .7s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* ============ 漢堡選單（頁尾項目搬入） ============ */
+
+.menu-wrap { flex-shrink: 0; }
+
+/* 以 sticky .topbar 做定位基準（topbar 係 positioned ancestor）：
+   top:100% = topbar 底邊，+6px 間距；滾動時 topbar 貼頂，選單跟住貼頂 */
+.menu-panel {
+	position: absolute;
+	top: calc(100% + 6px);
+	right: 14px;
+	width: 264px;
+	max-width: calc(100vw - 28px);
+	background: var(--surface);
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	box-shadow: var(--shadow-lg);
+	z-index: 60;
+	padding: 6px;
+}
+.menu-panel[hidden] { display: none; }
+
+.menu-item {
+	display: flex;
+	align-items: flex-start;
+	gap: 10px;
+	padding: 10px;
+	border-radius: var(--radius-sm);
+	width: 100%;
+	text-align: left;
+	background: none;
+	border: 0;
+	font-family: inherit;
+}
+button.menu-item { cursor: pointer; }
+button.menu-item:active { background: var(--surface-2); }
+.menu-item .mi-ico {
+	width: 18px; height: 18px;
+	fill: none; stroke: var(--text-3);
+	stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
+	flex-shrink: 0;
+	margin-top: 1px;
+}
+.menu-item.danger .mi-ico { stroke: #c0392b; }
+.menu-item.danger .mi-title { color: #c0392b; }
+.menu-item .mi-body { flex: 1; min-width: 0; }
+.mi-title { font-size: 14px; font-weight: 500; color: var(--text); }
+.mi-desc { font-size: 11px; color: var(--text-3); line-height: 1.55; margin-top: 2px; }
+.mi-desc a { color: var(--text-3); text-decoration: underline; }
+
 /* ============ 搜尋頁 ============ */
 
 .search-box { padding: 16px 14px 10px; background: var(--surface); }
@@ -197,6 +246,10 @@ body {
 .result .name .sub2 { font-weight: 400; font-size: 12px; color: var(--text-2); }
 .result .meta { font-size: 12px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
 .result .chev { width: 16px; height: 16px; stroke: var(--text-3); fill: none; stroke-width: 2; flex-shrink: 0; }
+
+/* 最近搜尋「更多…／收起」列 */
+.result.more-row .name { font-size: 13px; font-weight: 500; color: var(--text-2); }
+.result.more-row.expanded .chev { transform: rotate(180deg); }
 
 .tag {
 	display: inline-block;
