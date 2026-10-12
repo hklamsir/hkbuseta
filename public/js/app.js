@@ -164,7 +164,7 @@
 	 * 為何唔直接顯示 buildId：buildId 係**離線資料**的內容 hash，每日資料更新就會變，
 	 * 用戶會誤以為係新版 app。版本號必須只隨**程式碼**改動而變。
 	 */
-	const VERSION_FALLBACK = '1.1.0';
+	const VERSION_FALLBACK = '1.2.0';
 	let APP_VERSION = VERSION_FALLBACK;
 
 	function renderVersion() {
@@ -956,9 +956,13 @@
 			  (XQ ? `（合併後 ${merged.length} 個）` : '') + ` · ${ms} 毫秒`
 			: '';
 
-		// 地圖已開啟時同步重繪
-		if (map && $('map').classList.contains('on')) {
-			map.setView([place.lat, place.lng], 16);
+		// 地圖已開啟時同步重繪（圓心／半徑跟附近站頁，見 openMap）
+		if (map && mapCenter && $('map').classList.contains('on')) {
+			mapCenter.place = place;
+			mapCenter.radius = radius;
+			mapCenter.nearby = list;
+			mapCenter.zoom = MAP_ZOOM_DEFAULT;
+			map.setView([place.lat, place.lng], MAP_ZOOM_DEFAULT);
 			renderMapLayers();
 		}
 
@@ -1034,6 +1038,17 @@
 	/* ============ M4 ETA 頁 ============ */
 
 	/**
+	 * ETA 頁地圖按鈕的搜尋半徑（米）與 zoom。
+	 *
+	 * ⚠️ 200 米而非 500 米（2026-10-12 用戶決定）：
+	 *    500 米內會塞入 40+ 個行車位，地圖密密麻麻睇唔到邊個係自己要去嘅站。
+	 *    200 米 ≈ 步行 2-3 分鐘範圍，只剩真正鄰近的站，反而實用。
+	 * zoom 18（原 16）= 放大兩級，站名牌同分佈看得清。
+	 */
+	const STOP_MAP_RADIUS = 200;
+	const STOP_MAP_ZOOM = 18;
+
+	/**
 	 * ETA 頁返回。
 	 *
 	 * ⚠️ M10：改用 goBack()（history.back()）→ 與手機／瀏覽器上一頁行同一條 stack。
@@ -1062,6 +1077,15 @@
 		await boot();
 		stopRoutePolling();      // 路線頁的輪詢要先停，避免背景跑無用請求
 		stopPolling();          // 先停上一輪，避免請求堆疊
+		// ⚠️ 防呆（2026-10-12）：stop ID 必須連同公司一齊記低。
+		//    九巴 / 城巴 API 收到對方的 stop ID 都係 HTTP 200 + data: []（安靜回空），
+		//    唔會有錯誤訊息 → 一旦漏傳 co，畫面就會誤顯示「此站暫時冇到站預報」。
+		//    故喺入口補回偏好公司，正常情況下呼叫端已帶 co（見 5 個 openEta 呼叫點）。
+		if (!stop.co) stop.co = adapter.id;
+		if (Array.isArray(stop.ids)) {
+			stop.ids = stop.ids.map((x) =>
+				(typeof x === 'string' ? { co: stop.co, stop: x } : { ...x, co: x.co || stop.co }));
+		}
 		state.stop = stop;
 		// 記錄來源，供返回按鈕決定目標：
 		//   'recent' → 從常到車站進入，返回首頁
@@ -1070,8 +1094,11 @@
 		state.etaFrom = stop.from === 'recent' ? 'recent'
 			: stop.from === 'route' ? 'route' : null;
 		$('eta-name').textContent = stop.name;
-		$('eta-coord').textContent =
-			`${stop.lat.toFixed(5)}, ${stop.lng.toFixed(5)}` + (stop.distance != null ? ` · 距離 ${stop.distance} 米` : '');
+		// 座標文字已改為地圖按鈕（#eta-map），只在有座標時啟用
+		const hasGeo = Number.isFinite(stop.lat) && Number.isFinite(stop.lng);
+		$('eta-map').hidden = !hasGeo;
+		$('eta-map-label').textContent = (stop.distance != null ? `距離 ${stop.distance} 米 · ` : '') +
+			`附近 ${STOP_MAP_RADIUS} 米地圖`;
 		$('eta-sub').textContent = stop.name;
 		syncFavBtn();
 		$('eta-list').innerHTML = '<div class="card" style="margin:0 14px"><div class="skel"><div class="l" style="width:40%"></div></div><div class="skel"><div class="l" style="width:55%"></div></div><div class="skel"><div class="l" style="width:45%"></div></div></div>';
@@ -1284,6 +1311,49 @@
 				const svcTag = mainSvc && mainSvc !== 1 ? `<span class="svc-tag">${esc(B.SERVICE_LABELS[mainSvc] || mainSvc)}</span>` : '';
 				const multi = new Set(g.map((o) => o.stop)).size > 1;
 				const multiTag = multi ? `<span class="svc-tag" title="此路線有多個行車位在此站">多位置</span>` : '';
+
+				/**
+				 * 行車位標示（2026-10-12 新增）。
+				 *
+				 * 問題：ETA 頁把同一屋苑的多個行車位合併顯示，但路線可能只停其中一個。
+				 *   實測「淘大花園」有 6 個行車位，**路線 101 只停 KT698**；
+				 *   合併後 101 顯示在 KT695 頁上，用戶跟時間走去 KT698 以外嘅位就撲空。
+				 *
+				 * 解法：查離線站序反查「該路線停邊幾個 stop」（零網絡），
+				 *   再同本頁顯示的行車位比對：
+				 *     · 有交集 → 顯示「停 KT698」（括號編碼），提醒用戶去哪塊牌
+				 *     · 無交集 → 標為「不停此位」，明確叫用戶行去別的行車位
+				 *
+				 * 只在**多位置**時顯示：單一行車位必然對應，唔需要囉嗦。
+				 */
+				const bayTag = (() => {
+					if (!multi) return '';
+					// 本頁所有行車位（同公司合併後的聯集）
+					const pageStops = new Set(normalizeStopIds(state.stop).map((x) => x.stop));
+					const route = g[0].route;
+					// 反查：該路線（全部方向）停哪些 stop
+					const served = new Set();
+					for (const id of normalizeStopIds(state.stop)) {
+						const store = DBS[id.co];
+						if (!store) continue;
+						for (const sid of B.getRouteStopIds(store, route)) served.add(sid);
+					}
+					if (!served.size) return '';
+					const hit = [...served].filter((sid) => pageStops.has(sid));
+					// 抽行車位編碼（如 KT698）；冇括號編碼則退回站名後綴
+					const codeOf = (sid) => {
+						const st = DBS[normalizeStopIds(state.stop).find((x) => x.stop === sid)?.co]?.stopById.get(sid);
+						return st ? (splitCode(st.name).code || '') : '';
+					};
+					if (!hit.length) {
+						return `<span class="bay-tag warn" title="此路線不停本頁顯示的行車位，請按地圖指示前往其他行車位">不停此位</span>`;
+					}
+					const codes = [...new Set(hit.map(codeOf).filter(Boolean))];
+					if (!codes.length) return '';
+					// 該路線只停其中部分行車位 → 點出編號；全停就唔需要提
+					if (codes.length >= pageStops.size) return '';
+					return `<span class="bay-tag" title="此路線只停以下行車位：${esc(codes.join('、'))}">停 ${esc(codes.join('、'))}</span>`;
+				})();
 				const etas = g.map((o) => {
 					const f = B.formatEta(o);
 					const tip = f.full ? ` title="${esc(f.full)}"` : '';
@@ -1313,7 +1383,7 @@
 					data-co="${esc(cos[0] || '')}"
 					data-svc="${esc(mainSvc == null ? 1 : mainSvc)}" data-dest="${esc(dest)}"${cosAttr}>
 					<span class="route-no">${dots}${esc(g[0].route)}</span>
-					<span class="dest">${esc(dest)}${svcTag}${multiTag}</span>
+					<span class="dest">${esc(dest)}${svcTag}${multiTag}${bayTag}</span>
 					<span class="eta-list">${etas}</span>
 				</button>`;
 			}).join('');
@@ -1603,7 +1673,13 @@ function setRouteDir(dir, svc, ctx, hint) {
 			if (jump) {
 				stopRoutePolling();
 				// from='route' → ETA 頁返回時返路線頁
-				openEta({ stop: s.stop, name: s.name, lat: s.lat, lng: s.lng, from: 'route' });
+				//
+				// ⚠️ 必須帶 co（2026-10-12 修正實測 bug）：
+				//    路線頁站序來自 state.route.co 那家（例：城巴路線 104 的站 ID 是 001163），
+				//    若唔帶 co，normalizeStopIds 會 fallback 去 adapter.id（偏好公司），
+				//    變成用九巴 API 查一個城巴 stop ID → HTTP 200 + data: []（安靜回空）
+				//    → ETA 頁誤顯示「此站暫時冇到站預報」，但同一站其實有班次。
+				openEta({ stop: s.stop, co: state.route.co || adapter.id, name: s.name, lat: s.lat, lng: s.lng, from: 'route' });
 				return;
 			}
 			selectStop(s);
@@ -1774,23 +1850,43 @@ function setRouteDir(dir, svc, ctx, hint) {
 
 	let map = null, mapLayer = null, mapCenter = null, tileErr = 0;
 
-$('nb-map').addEventListener('click', openMap);
-$('nb-map2').addEventListener('click', openMap);
-$('map-close').addEventListener('click', closeMap);
+	/** 附近站頁地圖 zoom（ETA 頁另用較近的 STOP_MAP_ZOOM） */
+	const MAP_ZOOM_DEFAULT = 16;
+
+	$('nb-map').addEventListener('click', () => openMap());
+	$('nb-map2').addEventListener('click', () => openMap());
+	$('eta-map').addEventListener('click', openStopMap);
+	$('map-close').addEventListener('click', closeMap);
 
 	function closeMap() {
 		$('map').classList.remove('on');
 		mapOpenState = false;
 	}
 
-	function openMap() {
-		const { place, radius, nearby } = state;
+	/**
+	 * 開啟附近站地圖。
+	 * @param {{lat:number,lng:number,radius:number,zoom:number}} [opts] 傳入則以該點為圓心（ETA 頁用車站本身）
+	 */
+	function openMap(opts) {
+		// ⚠️ 必須驗 lat 而唔係淨係 `opts` —— 呢個函式有時會被當 event handler 用
+		//    （舊寫法 `$('nb-map').addEventListener('click', openMap)` 會把 MouseEvent
+		//    當 opts 傳入，令 opts 永遠 truthy → 圓心變 undefined → 地圖開唔到）。
+		const hasCenter = opts && Number.isFinite(opts.lat) && Number.isFinite(opts.lng);
+		// 圓心與半徑：附近站頁沿用 state.place；ETA 頁則用當前車站
+		const place = hasCenter ? { lat: opts.lat, lng: opts.lng } : state.place;
+		if (!place || !Number.isFinite(place.lat)) return;
+		const radius = hasCenter ? (opts.radius || STOP_MAP_RADIUS) : state.radius;
+		const zoom = hasCenter ? (opts.zoom || STOP_MAP_ZOOM) : MAP_ZOOM_DEFAULT;
+		// 站點列表：ETA 頁就地計算（跨公司），附近站頁沿用 renderNearby 已算好的
+		const nearby = hasCenter ? collectNearby(place, radius) : state.nearby;
+
+		mapCenter = { place, radius, nearby, zoom };
 		$('map').classList.add('on');
 		mapOpenState = true;
 		setTimeout(() => {
 			if (!map) {
 				map = L.map('map', { zoomControl: true, attributionControl: true })
-					.setView([place.lat, place.lng], 16);
+					.setView([place.lat, place.lng], zoom);
 				tileLayer = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
 					attribution: '&copy; OpenStreetMap', maxZoom: 19, minZoom: 15,
 					crossOrigin: true
@@ -1805,18 +1901,39 @@ $('map-close').addEventListener('click', closeMap);
 				tileLayer.on('tileload', () => { $('map-offline').classList.remove('on'); });
 			}
 			map.invalidateSize();
-			map.setView([place.lat, place.lng], 16);
+			map.setView([place.lat, place.lng], zoom);
 			renderMapLayers();
 		}, 60);
 	}
+
+	/**
+	 * ETA 頁的地圖按鈕：以**當前車站**為圓心，顯示 200 米內兩家公司的車站。
+	 */
+	function openStopMap() {
+		const s = state.stop;
+		if (!s || !Number.isFinite(s.lat) || !Number.isFinite(s.lng)) {
+			toast('此站未有座標資料');
+			return;
+		}
+		openMap({ lat: s.lat, lng: s.lng, radius: STOP_MAP_RADIUS });
+	}
+
+	/** 跨公司收集圓心範圍內的車站（純記憶體，零網絡請求） */
+	function collectNearby(place, radius) {
+		const list = [];
+		for (const co of Object.keys(DBS)) {
+			for (const s of B.findNearbyStops(DBS[co], place, radius)) list.push({ ...s, co });
+		}
+		return list;
+	}
+
 	let tileLayer = null;
 
 	function renderMapLayers() {
-		if (!map) return;
+		if (!map || !mapCenter) return;
 		if (mapLayer) map.removeLayer(mapLayer);
 		mapLayer = L.layerGroup().addTo(map);
-		const { place, radius, nearby } = state;
-		if (!place) return;
+		const { place, radius, nearby } = mapCenter;
 
 		// 範圍圓圈（vector，永遠可畫）
 		L.circle([place.lat, place.lng], {
@@ -1842,14 +1959,19 @@ $('map-close').addEventListener('click', closeMap);
 			const s = grp[0];
 			const cls = s.distance < 150 ? 'near' : s.distance < 300 ? 'mid' : 'far';
 			const color = { near: '#0f7b3f', mid: '#c2600c', far: '#8b95a1' }[cls];
-			const routes = new Set(B.getStopRoutes(DB, s.stop).map((r) => r.route));
-			const tip = `<strong>${s.name}</strong><br>${s.distance} 米 · ${routes.size} 條路線` +
+			const routes = new Set(getStopRoutesMultiCo(s).map((r) => r.route));
+			const tip = `<strong>${esc(splitCode(s.name).base)}</strong><br>${s.distance} 米 · ${routes.size} 條路線` +
 				(grp.length > 1 ? `<br>共 ${grp.length} 個行車位` : '');
 			// 點擊 marker 或圓點 → 跳到該站 ETA 頁（含同組所有行車位）
+			//
+			// ⚠️ 必須帶 co + 逐 stop 掛自己公司（2026-10-12 修正）：
+			//    原先 ids 只傳 stop ID 字串，normalizeStopIds 會全部 fallback 去
+			//    adapter.id（偏好公司）→ 查另一家公司的 stop ID 會安靜回空資料。
+			const ids = grp.map((x) => ({ co: x.co || adapter.id, stop: x.stop }));
 			const goEta = (ev) => {
 				L.DomEvent.stop(ev);
 				closeMap();
-				openEta({ stop: s.stop, name: s.name, lat: s.lat, lng: s.lng, ids: grp.map((x) => x.stop), distance: s.distance });
+				openEta({ stop: s.stop, co: s.co || adapter.id, name: s.name, lat: s.lat, lng: s.lng, ids, distance: s.distance });
 			};
 			if (grp.length > 1) {
 				// 聚合：圓角矩形標「×N」
@@ -1871,12 +1993,21 @@ $('map-close').addEventListener('click', closeMap);
 		// 站名標籤：只標示最近的一個站，避免互相遮擋（其餘靠點擊/懸停查看）
 		if (nearby.length) {
 			const s = nearby[0];
-			const routes = new Set(B.getStopRoutes(DB, s.stop).map((r) => r.route));
+			const routes = new Set(getStopRoutesMultiCo(s).map((r) => r.route));
 			L.tooltip({ permanent: true, direction: 'right', offset: [10, 0], className: 'stop-label', opacity: 1 })
-				.setContent(`<strong>${s.name}</strong><br><small>${s.distance} 米 · ${routes.size} 條路線</small>`)
+				.setContent(`<strong>${esc(splitCode(s.name).base)}</strong><br><small>${s.distance} 米 · ${routes.size} 條路線</small>`)
 				.setLatLng([s.lat, s.lng])
 				.addTo(mapLayer);
 		}
+	}
+
+	/** 跨公司取某站的全部路線（去重）—— 地圖 tooltip 用 */
+	function getStopRoutesMultiCo(s) {
+		const out = [];
+		for (const co of Object.keys(DBS)) {
+			for (const r of B.getStopRoutes(DBS[co], s.stop)) out.push(r);
+		}
+		return out;
 	}
 
 	/* ============ 工具 ============ */

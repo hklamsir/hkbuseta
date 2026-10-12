@@ -149,13 +149,18 @@
 		// （例 3D/I 平日去「慈雲山(中)」17 站、繁忙時段去「慈雲山(南)」13 站）。
 		const routeIdxByKey = new Map();
 		// routeIdxByNo: "route|bound" → [routeIdx...]（同路線號多 svc 候選）
+		// routeIdxsByRouteNo: "route" → [routeIdx...]（全部方向／svc，2026-10-12 新增）
+		//   用途：ETA 頁合併行車位時要標示「該路線實際停邊幾個行車位」。
 		const routeIdxByNo = new Map();
+		const routeIdxsByRouteNo = new Map();
 		for (let i = 0; i < routeList.length; i++) {
 			const [route, bound, svc] = routeList[i];
 			routeIdxByKey.set(`${route}|${bound}|${svc}`, i);
 			const k2 = `${route}|${bound}`;
 			if (!routeIdxByNo.has(k2)) routeIdxByNo.set(k2, []);
 			routeIdxByNo.get(k2).push(i);
+			if (!routeIdxsByRouteNo.has(route)) routeIdxsByRouteNo.set(route, []);
+			routeIdxsByRouteNo.get(route).push(i);
 		}
 
 		routeStops.forEach(([ri, seq, si]) => {
@@ -196,6 +201,7 @@
 			routeSeqs,
 			routeIdxByKey,
 			routeIdxByNo,
+			routeIdxsByRouteNo,
 			loadMs: Math.round(performance.now() - t0)
 		};
 	}
@@ -663,6 +669,31 @@
 	/** 取得某車站的全部路線（跨 service_type，UI 需自行去重） */
 	function getStopRoutes(store, stopId) {
 		return store.stopRoutes.get(stopId) || [];
+	}
+
+	/**
+	 * 反查「某條路線停哪些 stop ID」（同一路線全部方向／svc 合併）。
+	 *
+	 * 用途（2026-10-12）：ETA 頁會把同一屋苑的多個行車位合併顯示
+	 * （例：淘大花園有 6 個行車位），但路線 101 只停其中 KT698。
+	 * 合併顯示會令用戶以為「該路線停我面前呢個牌」，跟住時間去錯位撲空。
+	 * 故 UI 需要知道每條路線實際停邊幾個行車位 → 在 ETA 行標示「停 KT698」。
+	 *
+	 * @returns {Set<string>} stop ID 集合（不可直接改動）
+	 */
+	function getRouteStopIds(store, route) {
+		const key = `r|${route}`;
+		if (!store._routeStopsByNo) store._routeStopsByNo = new Map();
+		let idx = store._routeStopsByNo.get(key);
+		if (!idx) {
+			idx = new Set();
+			// routeIdxsByRouteNo: route → [routeIdx...]（全部方向／svc）
+			for (const rIdx of store.routeIdxsByRouteNo.get(String(route)) || []) {
+				for (const s of store.routeSeqs[rIdx] || []) idx.add(s.stop);
+			}
+			store._routeStopsByNo.set(key, idx);
+		}
+		return idx;
 	}
 
 	/** 取得某路線的站序 */
@@ -1207,7 +1238,7 @@
 		setCurrentStore, currentStore,
 		// M9 跨公司合併
 		crossIndex, resetCrossIndex, getCrossStops, crossQueryable, normalizeDir,
-		findNearbyStops, getStopRoutes, getRouteSequence,
+		findNearbyStops, getStopRoutes, getRouteStopIds, getRouteSequence,
 		findRouteIdx, resolveRouteSeq,
 		normalizeEta, formatEta, SERVICE_LABELS,
 		// mapCtbEta 匯出供 verify.mjs [CTB-2] 直接驗證兩種 raw 形狀的映射

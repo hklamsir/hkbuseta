@@ -159,13 +159,38 @@ ok(taoda[0].dist <= 50, '最前項距離最近', `${taoda[0].dist} 米`);
 ok(taoda[1].dist > taoda[0].dist && taoda[1].tag === '區塊中心',
 	'住宅區塊中心排在後面並標示「區塊中心」', `${taoda[1].dist} 米`);
 
-// 揀最前項 → 應顯示完整站數（含德福花園）
+// 揀最前項 → 應顯示站列表
 await page.click('#search-results .result');
 await page.waitForFunction(() => document.getElementById('page-nearby')?.classList.contains('active'), { timeout: 10000 });
 await page.waitForTimeout(600);
 const taodaStops = await page.$$eval('#nb-list .stop .name .txt', (els) => els.map((e) => e.textContent.trim()));
-ok(taodaStops.length >= 6, '揀「準確位置」後站數完整', `${taodaStops.length} 組`);
-ok(taodaStops.some((s) => s.includes('德福花園')), '包含原本漏掉的德福花園（切邊問題已解）');
+
+/**
+ * 迴歸重寫（2026-10-12）：原本斷言「200 米內必須包含德福花園」。
+ *
+ * 失敗原因**唔係 app 邏輯錯**，而係斷言綁死了一個會漂移的邊界值：
+ *   官方車站座標每日更新，「德福花園 KT667」由 199 米飄到 **205 米**，
+ *   剛好推出 200 米預設範圍 → 連帶每日 build 都紅。
+ *   實測：撳 500 米仍然見到德福花園，證明搜尋與範圍邏輯正常。
+ *
+ * 真正要守住的性質（與座標漂移無關）：
+ *   ① bus_stop 命中點排第一（已由上面 156-160 斷言）
+ *   ② 擴大範圍 → 站組增加；收窄 → 站組回復（範圍篩選雙向生效）
+ *   ③ 被切邊漏掉的站（德福花園）在 500 米內可見
+ */
+ok(taodaStops.length >= 6, '範圍內站組數正常', `${taodaStops.length} 組`);
+// 擴到 500 米後，原本被切邊漏掉的站應該出現 —— 這才是該迴歸測試的真正目的
+await page.click('#range-seg button[data-r="500"]');
+await page.waitForTimeout(700);
+const taoda500 = await page.$$eval('#nb-list .stop .name .txt', (els) => els.map((e) => e.textContent.trim()));
+ok(taoda500.length > taodaStops.length, '擴大範圍後站組增加（範圍篩選生效）',
+	`200m ${taodaStops.length} 組 → 500m ${taoda500.length} 組`);
+ok(taoda500.some((s) => s.includes('德福花園')), '500 米內包含德福花園（擴範圍後可見）');
+// 切回 200 米，確認範圍切換真的收窄（唔係只增不減）
+await page.click('#range-seg button[data-r="200"]');
+await page.waitForTimeout(700);
+const taodaBack = await page.$$eval('#nb-list .stop .name .txt', (els) => els.map((e) => e.textContent.trim()));
+ok(taodaBack.length === taodaStops.length, '切回 200 米後站組數回復', `${taodaBack.length} 組`);
 await page.screenshot({ path: join(SHOTS, '13-search-rank.png') });
 await page.click('#nb-back');
 await page.waitForTimeout(300);
@@ -315,8 +340,11 @@ await page.waitForTimeout(500);
 
 const etaName = await page.textContent('#eta-name');
 ok(etaName.length > 0, '站名已顯示', etaName);
-const coord = await page.textContent('#eta-coord');
-ok(/22\.\d{4,6}, 114\.\d{4,6}/.test(coord), '座標已顯示', coord.trim());
+// 座標文字已改為地圖按鈕（2026-10-12）
+const mapBtnVisible = await page.$eval('#eta-map', (e) => !e.hidden && e.offsetParent !== null);
+ok(mapBtnVisible, '地圖按鈕已取代座標文字並可見', '');
+const mapBtnText = (await page.textContent('#eta-map-label')).trim();
+ok(/附近 200 米地圖/.test(mapBtnText), '地圖按鈕標示 200 米半徑', mapBtnText);
 
 const hasRows = await page.$$eval('.eta-row', (els) => els.length);
 if (hasRows) {
@@ -363,6 +391,35 @@ const markerCount = await page.evaluate(() => {
 ok(markerCount > 0, '站點 marker 已繪製', `${markerCount} 個`);
 await page.screenshot({ path: join(SHOTS, '06-map.png') });
 await page.click('#map-close');
+await page.waitForTimeout(200);
+
+/* ---------- 7b. ETA 頁地圖按鈕（以車站為圓心 500 米） ---------- */
+console.log('\n[7b] ETA 頁地圖按鈕');
+await page.click('.stop');
+await page.waitForSelector('.eta-row, .empty, .error-box', { timeout: 20000 });
+await page.waitForTimeout(400);
+await page.click('#eta-map');
+await page.waitForTimeout(1800);
+const etaMapOn = await page.$eval('#map', (e) => e.classList.contains('on'));
+ok(etaMapOn, 'ETA 頁地圖已開啟', '');
+const etaMapMarkers = await page.$$eval('#map .leaflet-interactive', (els) => els.length);
+ok(etaMapMarkers > 0, '以車站為圓心的站點 marker 已繪製', `${etaMapMarkers} 個`);
+// zoom 應為 18（附近站頁 16 的兩級）—— 避免日後無聲還原成 16 而測試仍然通過
+const etaMapZoom = await page.evaluate(() => {
+	const m = document.querySelector('#map .leaflet-container');
+	// Leaflet 把 zoom level 寫在容器的 _leaflet_id 對應 instance，改用 tile URL 推算較穩陣
+	const tiles = [...document.querySelectorAll('#map img.leaflet-tile')];
+	const z = tiles.map((t) => t.src.match(/\/(\d+)\/\d+\/\d+\.png$/)?.[1]).filter(Boolean);
+	return z.length ? Number(z[0]) : null;
+});
+ok(etaMapZoom === 18, 'ETA 頁地圖已放大至 zoom 18（比附近站頁深兩級）', `實際 zoom ${etaMapZoom}`);
+await page.screenshot({ path: join(SHOTS, '06b-eta-map.png') });
+await page.click('#map-close');
+await page.waitForTimeout(200);
+// ⚠️ 必須返到附近站頁：[8] 由 #nb-back 回搜尋頁，若停喺 ETA 頁會撳唔到
+await page.click('#eta-back');
+await page.waitForTimeout(400);
+ok(await page.$eval('#page-nearby', (e) => e.classList.contains('active')), '已返回附近站頁（[8] 的前提）');
 
 /* ---------- 8. 個人化 ---------- */
 console.log('\n[8] 個人化（localStorage）');
@@ -433,8 +490,12 @@ ok(/到站時間/.test(rt.etaText), '選中站 ETA 已 inline 展開', rt.etaTex
 await page.screenshot({ path: join(SHOTS, '08-route-page.png') });
 
 // ETA 格式合規 + 無負數
+// ⚠️ 已知 flaky：呢個測試揀嘅路線由「ETA 頁第一行」決定（隨官方即時資料變）。
+//    若該路線在測試時刻恰好無班次，rtEtas 會係空 → 紅。
+//    實測 2026-10-12 連跑 2 次綠、中間 1 次紅（揀到夜間路線），確認與改動無關。
+//    唔寫死路線號因為要覆蓋真實「由 ETA 行跳路線頁」流程。
 const rtEtas = await page.evaluate(() => [...document.querySelectorAll('#rt-list .seq-eta .eta')].map((e) => e.textContent.replace(/\s+/g, ' ').trim()));
-ok(rtEtas.length > 0, '選中站有 ETA 資料', rtEtas.join(' | '));
+ok(rtEtas.length > 0, '選中站有 ETA 資料', rtEtas.join(' | ') || '（該路線此刻無班次，屬時段因素）');
 ok(!rtEtas.some((t) => /-\d/.test(t)), '路線頁 ETA 無負數倒數', '');
 
 // 切換方向（零網絡請求）
@@ -493,6 +554,44 @@ const rtStar = await page.evaluate(() => {
 });
 ok(rtStar.on && rtStar.off, '常搭路線星號可加/移除');
 ok(rtStar.saved === 1, '常搭路線已寫入 localStorage', rtStar.key);
+
+// [回歸 2026-10-12] 路線頁按「→」跳 ETA 頁必須帶 co。
+// 實測 bug：路線站序來自 state.route.co 那家（城巴路線 104 站 ID = 001163），
+// 若唔帶 co → normalizeStopIds fallback 去 adapter.id（偏好九巴）
+// → 用九巴 API 查城巴 stop ID = HTTP 200 + data: [] → 誤顯示「此站暫時冇到站預報」。
+// 驗證方法：記錄跳轉前 state.stop 的 co／stop 同路線頁的 co 是否一致。
+const jumpCo = await page.evaluate(() => {
+	const sel = document.querySelector('#rt-list .seq-row.sel');
+	const jump = sel?.querySelector('[data-jump]');
+	if (!jump) return null;
+	jump.click();
+	return true;
+});
+if (jumpCo) {
+	await page.waitForSelector('#page-eta.active', { timeout: 8000 });
+	// ⚠️ 唔可以用固定 waitForTimeout：ETA 要打網絡（兩家 stop-eta 可能有 cache 差異），
+	//    2500ms 唔夠時會讀到 skeleton（rows=0 且 empty=false），令斷言誤報失敗。
+	//    正確做法：等「結果容器」出現（.eta-row 有行、或 .empty 空狀態、或 .error-box）。
+	await page.waitForSelector('#eta-list .eta-row, #eta-list .empty, #eta-list .error-box', { timeout: 20000 });
+	await page.waitForTimeout(600);
+	const etaJump = await page.evaluate(() => ({
+		name: document.getElementById('eta-name').textContent.trim(),
+		dots: [...document.querySelectorAll('.eta-row .co-dot')].map((e) => e.className),
+		empty: !!document.querySelector('#eta-list .empty'),
+		rows: document.querySelectorAll('.eta-row').length
+	}));
+	// 斷言：唔應該「路線頁有 ETA 但跳轉後變空狀態」
+	const rtHadEta = rtEtas.some((t) => /\d+\s*分鐘|即將到/.test(t));
+	if (rtHadEta) {
+		ok(!etaJump.empty && etaJump.rows > 0,
+			'[回歸] 路線頁有 ETA 的站，跳 ETA 頁不應變成「冇到站預報」',
+			`rows=${etaJump.rows} empty=${etaJump.empty}`);
+	} else {
+		ok(true, '[回歸] 路線頁該站本來就無 ETA，跳轉空狀態屬正常（跳過）', '');
+	}
+	await page.click('#eta-back');
+	await page.waitForTimeout(400);
+}
 
 // 返回按鈕 → 回 ETA 頁（本次由 ETA 頁點路線行進入，屬正常流程）
 await page.click('#rt-back');
@@ -1235,6 +1334,31 @@ ok(dupNos.length === 0, '[XCO-3] 同一路線號只有一行（方向字母已�
 ok(xco3.multiCo.length > 0, '[XCO-3] 有行同時顯示兩家公司色點（方向合併成功）',
 	xco3.multiCo.map((r) => `${r.no}[${r.dots.join('+')}]`).join(' '));
 await page.screenshot({ path: join(SHOTS, '12-m9-eta-merged.png') });
+
+/* [BAY-1] 多行車位時標示該路線實際停邊塊牌（2026-12 新增） */
+const bay1 = await page.evaluate(() => {
+	const rows = [...document.querySelectorAll('#eta-list .eta-row')];
+	const withMulti = rows.filter((r) => r.querySelector('.dest .svc-tag')?.textContent.includes('多位置'));
+	return {
+		multiRows: withMulti.length,
+		bayTagged: [...document.querySelectorAll('#eta-list .bay-tag')].map((e) => ({
+			text: e.textContent.trim(),
+			warn: e.classList.contains('warn')
+		})),
+		// 合法標示：只可係「停 XXX」或「不停此位」
+		bad: [...document.querySelectorAll('#eta-list .bay-tag')]
+			.map((e) => e.textContent.trim())
+			.filter((t) => !/^停\s*\([A-Z]{1,3}\d+\)$/.test(t) && t !== '不停此位')
+	};
+});
+ok(bay1.bad.length === 0, '[BAY-1] 行車位標示格式合法（只出現「停 (XXX)」或「不停此位」）',
+	`實得 ${bay1.bayTagged.map((t) => t.text).join('、') || '（本頁站只有單一行車位，無標示屬正確）'}`);
+// 單一行車位不應被標示（會造成囉嗦）
+const singleBay = await page.evaluate(() =>
+	[...document.querySelectorAll('#eta-list .eta-row')]
+		.filter((r) => !r.querySelector('.dest .svc-tag')?.textContent.includes('多位置'))
+		.filter((r) => r.querySelector('.bay-tag')).length);
+ok(singleBay === 0, '[BAY-1] 單一行車位的路線不被標示（避免囉嗦）', `${singleBay} 行有多餘標示`);
 
 /* [XCO-4] 撞號路線不得合併 */
 const xco4 = await page.evaluate(() => {
