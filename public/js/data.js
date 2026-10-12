@@ -976,6 +976,268 @@
 		return { text: `${Math.floor(min / 60)} 小時 ${min % 60} 分`, sub: clock, tone: 'ok' };
 	}
 
+	/* ============ M12 點到點路線規劃（ADR-001） ============ */
+
+	/**
+	 * 常數（計劃書 §4）。
+	 * ⚠️ WALK_RADIUS（M12 規劃用步行接駁半徑）同 F1 定位顯示半徑 200 語義唔同，
+	 *    分開常數，唔可以混用（ADR-002 後果欄）。
+	 */
+	const WALK_RADIUS = 500;
+	const PLAN_CAP_STOPS = 2000;   // 枚舉物理站上限（超過只回直達，計劃書 §3.2）
+	const PLAN_CAP_MS = 200;       // 轉車搜尋時間上限（超時只回直達）
+	const WALK_FACTOR = 1.3;       // 直線距離 → 路網步行距離估算因子
+
+	/**
+	 * 某站（連同其跨公司 cross 配對站）的完整物理站成員清單（含座標與站名）。
+	 * 用於「落車後步行 0 米轉對面公司上車」的轉車站展開。
+	 */
+	function physicalMembers(stores, co, stopId) {
+		const out = [];
+		const self = stores[co] && stores[co].stopById.get(stopId);
+		if (self) out.push({ co, stop: stopId, name: self.name, lat: self.lat, lng: self.lng });
+		for (const p of getCrossStops(stores.ctb, stopId)) {
+			if (out.some((x) => x.co === p.co && x.stop === p.stop)) continue;
+			const ps = stores[p.co] && stores[p.co].stopById.get(p.stop);
+			if (ps) out.push({ co: p.co, stop: p.stop, name: ps.name, lat: ps.lat, lng: ps.lng });
+		}
+		return out;
+	}
+
+	/**
+	 * 把中心點展開成「物理站群組」（ADR-001 候選站展開）。
+	 *
+	 * 每群 = 500 米（WALK_RADIUS）內候選站經 cross 配對 union 後的同一物理站；
+	 * 配對夥伴即使剛好喺半徑切邊外（座標幾米差），都併入同一群（同一物理位置）。
+	 *
+	 * @returns {Array<{members:Array<{co,stop,name,lat,lng}>, walk:number, name:string}>}
+	 *   walk = 群內成員到中心的最小直線距離（米）
+	 */
+	function physGroups(stores, center, radius) {
+		const cand = [];
+		for (const co of Object.keys(stores)) {
+			for (const s of findNearbyStops(stores[co], center, radius)) cand.push({ ...s, co });
+		}
+		const keyOf = (co, stop) => `${co}|${stop}`;
+		const parent = new Map();
+		const find = (x) => {
+			while (parent.get(x) !== x) { parent.set(x, parent.get(parent.get(x))); x = parent.get(x); }
+			return x;
+		};
+		const union = (a, b) => {
+			const ra = find(a), rb = find(b);
+			if (ra === rb) return;
+			if (ra < rb) parent.set(rb, ra); else parent.set(ra, rb);   // 決定性（同 renderNearby 慣例）
+		};
+		for (const c of cand) {
+			const k = keyOf(c.co, c.stop);
+			if (!parent.has(k)) parent.set(k, k);
+			for (const p of getCrossStops(stores.ctb, c.stop)) {
+				const pk = keyOf(p.co, p.stop);
+				if (!parent.has(pk)) {
+					const ps = stores[p.co] && stores[p.co].stopById.get(p.stop);
+					if (!ps) continue;
+					parent.set(pk, pk);
+					// 夾帶夥伴資料供群組計算步行距離（push 進 cand 令 union-find 覆蓋到佢）
+					cand.push({ co: p.co, stop: p.stop, name: ps.name, lat: ps.lat, lng: ps.lng });
+				}
+				union(k, pk);
+			}
+		}
+		const groups = new Map();
+		for (const c of cand) {
+			const root = find(keyOf(c.co, c.stop));
+			let g = groups.get(root);
+			if (!g) groups.set(root, (g = { members: [], walk: Infinity, name: c.name }));
+			const d = haversine(center.lat, center.lng, c.lat, c.lng);
+			if (d < g.walk) { g.walk = d; g.name = c.name; }
+			g.members.push({ co: c.co, stop: c.stop, name: c.name, lat: c.lat, lng: c.lng });
+		}
+		return [...groups.values()];
+	}
+
+	/**
+	 * resolveRouteSeq 結果快取（按 store 實例做 WeakMap 鍵 —— 換 store（重載資料）自動失效）。
+	 * 轉車搜尋會反覆 resolve 同一 (co,route,bound,svc) 站序，唔快取會重複建數萬次陣列。
+	 */
+	const _seqCache = new WeakMap();
+	function cachedSeq(store, co, route, bound, svc) {
+		let m = _seqCache.get(store);
+		if (!m) _seqCache.set(store, (m = new Map()));
+		const k = `${co}|${route}|${bound}|${svc}`;
+		let v = m.get(k);
+		if (v === undefined) {
+			const res = resolveRouteSeq(store, route, bound, svc);
+			v = res ? res.stops.map((s) => ({ stop: s.stop, seq: s.seq, name: s.name, lat: s.lat, lng: s.lng })) : null;
+			m.set(k, v);
+		}
+		return v;
+	}
+
+	/**
+	 * 點到點巴士路線規劃（ADR-001）：直達（0 轉）+ 一次轉車（1 轉）。
+	 *
+	 * ⚠️ 全前端、純記憶體、零網絡請求 —— 資料全部來自 boot 已載入嘅 stores。
+	 *
+	 * @param {Record<string,object>} stores { kmb, ctb }（app.js 的 DBS）
+	 * @param {{lat:number,lng:number}} origin 起點座標
+	 * @param {{lat:number,lng:number}} dest 終點座標
+	 * @param {{maxTransfers?:number, walkRadius?:number}} [opts]
+	 * @returns {{plans:Array, capped:boolean, reason:string|null, oCount:number, dCount:number}}
+	 *   plan = { transfers, legs, walkOriginM, walkDestM, totalStops }
+	 *   leg  = { co, route, bound, svc, dest, from:{co,stop,name,lat,lng,seq}, to:{...}, stops }
+	 *   ⚠️ 絕不計算／回傳任何時間估算（決策乙）。
+	 */
+	function planTrip(stores, origin, dest, opts) {
+		const maxTransfers = (opts && opts.maxTransfers) != null ? opts.maxTransfers : 1;
+		const walkR = (opts && opts.walkRadius) != null ? opts.walkRadius : WALK_RADIUS;
+		const oGroups = physGroups(stores, origin, walkR);
+		const dGroups = physGroups(stores, dest, walkR);
+		const empty = { plans: [], capped: false, reason: null, oCount: oGroups.length, dCount: dGroups.length };
+		if (!oGroups.length || !dGroups.length) return { ...empty, reason: 'noStops' };
+
+		const mkPlan = (transfers, legs, walkO, walkD) => {
+			let totalStops = 0;
+			for (const l of legs) totalStops += l.stops;
+			return {
+				transfers, legs,
+				walkOriginM: Math.round(walkO * WALK_FACTOR),
+				walkDestM: Math.round(walkD * WALK_FACTOR),
+				totalStops
+			};
+		};
+		const plans = [];
+
+		/* ---- ① 直達：同一 (route,bound,svc) 且 seq(上) < seq(落)（R-G） ---- */
+		{
+			// dest 側索引：route|bound|svc → [{seq, gi, member, dest}]
+			const dIdx = new Map();
+			dGroups.forEach((g, gi) => {
+				for (const m of g.members) {
+					const store = stores[m.co];
+					if (!store) continue;
+					for (const r of getStopRoutes(store, m.stop)) {
+						const k = `${r.route}|${r.bound}|${r.svc}`;
+						if (!dIdx.has(k)) dIdx.set(k, []);
+						dIdx.get(k).push({ seq: r.seq, gi, member: m, dest: r.dest });
+					}
+				}
+			});
+			// 去重：同一走廊（route|bound）只留站數最少一條（跨公司同號合併，計劃書 §3.2）
+			const best = new Map();
+			for (const og of oGroups) {
+				for (const m of og.members) {
+					const store = stores[m.co];
+					if (!store) continue;
+					for (const r of getStopRoutes(store, m.stop)) {
+						const hits = dIdx.get(`${r.route}|${r.bound}|${r.svc}`);
+						if (!hits) continue;
+						for (const h of hits) {
+							if (h.seq <= r.seq) continue;   // 方向必須正確
+							const leg = {
+								co: m.co, route: r.route, bound: r.bound, svc: r.svc, dest: r.dest || h.dest,
+								from: { co: m.co, stop: m.stop, name: m.name, lat: m.lat, lng: m.lng, seq: r.seq },
+								to: { co: h.member.co, stop: h.member.stop, name: h.member.name, lat: h.member.lat, lng: h.member.lng, seq: h.seq },
+								stops: h.seq - r.seq
+							};
+							const p = mkPlan(0, [leg], og.walk, dGroups[h.gi].walk);
+							const k = `${r.route}|${r.bound}`;
+							const prev = best.get(k);
+							if (!prev || p.totalStops < prev.totalStops ||
+								(p.totalStops === prev.totalStops &&
+									p.walkOriginM + p.walkDestM < prev.walkOriginM + prev.walkDestM)) {
+								best.set(k, p);
+							}
+							break;   // 同一 (o entry, d entry) 一個命中已夠（svc 變體由 best 去重，R-E 已覆蓋）
+						}
+					}
+				}
+			}
+			plans.push(...best.values());
+		}
+
+		/* ---- ② 一次轉車：o → routeA → t（物理站，步行 0 轉對面公司） → routeB → d ---- */
+		let capped = false;
+		if (maxTransfers >= 1 && oGroups.length + dGroups.length <= PLAN_CAP_STOPS) {
+			const t0 = performance.now();
+			const dIdx2 = new Map();   // co|route|bound|svc → [{seq, gi, member, dest}]
+			dGroups.forEach((g, gi) => {
+				for (const m of g.members) {
+					const store = stores[m.co];
+					if (!store) continue;
+					for (const r of getStopRoutes(store, m.stop)) {
+						const k = `${m.co}|${r.route}|${r.bound}|${r.svc}`;
+						if (!dIdx2.has(k)) dIdx2.set(k, []);
+						dIdx2.get(k).push({ seq: r.seq, gi, member: m, dest: r.dest });
+					}
+				}
+			});
+			const bestT = new Map();   // coA|routeA|boundA|coB|routeB|boundB → plan
+			const seenOrig = new Set();
+			outer:
+			for (const og of oGroups) {
+				for (const m of og.members) {
+					const store = stores[m.co];
+					if (!store) continue;
+					for (const r of getStopRoutes(store, m.stop)) {
+						// 同一群組內多行車位會重複同一 (route,bound,svc,seq) → 只枚舉一次
+						const oKey = `${m.co}|${r.route}|${r.bound}|${r.svc}|${r.seq}`;
+						if (seenOrig.has(oKey)) continue;
+						seenOrig.add(oKey);
+						if (performance.now() - t0 > PLAN_CAP_MS) { capped = true; break outer; }
+						const seqA = cachedSeq(store, m.co, r.route, r.bound, r.svc);
+						if (!seqA) continue;
+						for (const t of seqA) {
+							if (t.seq <= r.seq) continue;   // 只睇上車站之後的轉車候選（R-G 前半）
+							// 轉車站嘅所有同物理站成員（含對面公司，步行 0）
+							for (const p of physicalMembers(stores, m.co, t.stop)) {
+								const pStore = stores[p.co];
+								if (!pStore) continue;
+								for (const rb of getStopRoutes(pStore, p.stop)) {
+									// 同公司同路線同方向 = 根本唔使轉（直達已覆蓋）
+									if (p.co === m.co && rb.route === r.route && rb.bound === r.bound) continue;
+									const hits = dIdx2.get(`${p.co}|${rb.route}|${rb.bound}|${rb.svc}`);
+									if (!hits) continue;
+									for (const h of hits) {
+										if (h.seq <= rb.seq) continue;   // R-G 後半：seq(轉) < seq(落)
+										const legA = {
+											co: m.co, route: r.route, bound: r.bound, svc: r.svc, dest: r.dest,
+											from: { co: m.co, stop: m.stop, name: m.name, lat: m.lat, lng: m.lng, seq: r.seq },
+											to: { co: m.co, stop: t.stop, name: t.name, lat: t.lat, lng: t.lng, seq: t.seq },
+											stops: t.seq - r.seq
+										};
+										const legB = {
+											co: p.co, route: rb.route, bound: rb.bound, svc: rb.svc, dest: rb.dest || h.dest,
+											from: { co: p.co, stop: p.stop, name: p.name, lat: p.lat, lng: p.lng, seq: rb.seq },
+											to: { co: h.member.co, stop: h.member.stop, name: h.member.name, lat: h.member.lat, lng: h.member.lng, seq: h.seq },
+											stops: h.seq - rb.seq
+										};
+										const plan = mkPlan(1, [legA, legB], og.walk, dGroups[h.gi].walk);
+										const k = `${m.co}|${r.route}|${r.bound}|${p.co}|${rb.route}|${rb.bound}`;
+										const prev = bestT.get(k);
+										if (!prev || plan.totalStops < prev.totalStops ||
+											(plan.totalStops === prev.totalStops &&
+												plan.walkOriginM + plan.walkDestM < prev.walkOriginM + prev.walkDestM)) {
+											bestT.set(k, plan);
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+			// 計劃書 §3.2：超過 cap 則只回直達（部分計算嘅轉車方案一併丟棄，保持語義一致）
+			if (!capped) plans.push(...bestT.values());
+		} else if (maxTransfers >= 1) {
+			capped = true;   // 物理站超上限（極端密集區）→ 只回直達
+		}
+
+		plans.sort((a, b) => a.transfers - b.transfers || a.totalStops - b.totalStops ||
+			(a.walkOriginM + a.walkDestM) - (b.walkOriginM + b.walkDestM));
+		return { plans, capped, reason: null, oCount: oGroups.length, dCount: dGroups.length };
+	}
+
 	/* ============ 持久化（M6） ============ */
 
 	const LS_RECENT = 'buseta.recent';
@@ -1241,6 +1503,8 @@
 		findNearbyStops, getStopRoutes, getRouteStopIds, getRouteSequence,
 		findRouteIdx, resolveRouteSeq,
 		normalizeEta, formatEta, SERVICE_LABELS,
+		// M12 點到點規劃（ADR-001）
+		planTrip, physGroups, physicalMembers, WALK_RADIUS, PLAN_CAP_STOPS, PLAN_CAP_MS, WALK_FACTOR,
 		// mapCtbEta 匯出供 verify.mjs [CTB-2] 直接驗證兩種 raw 形狀的映射
 		mapCtbEta,
 		searchPlaceRatelimited, clearGeoCache, GEO_MIN_GAP_MS,

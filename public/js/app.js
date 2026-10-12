@@ -59,6 +59,9 @@
 		routeTick: null,
 		routeLastFetch: 0,
 
+		/* 點到點路線（M12）：{ origin:{name,lat,lng,acc?,co?,stop?}, dest:{...}, result, capped } */
+		trip: null,
+
 		/**
 		 * 返回目標追蹤。
 		 * from = 'recent' → 從搜尋頁的常搭路線／常到車站進入，返回時直接回首頁
@@ -165,7 +168,7 @@
 	 * 為何唔直接顯示 buildId：buildId 係**離線資料**的內容 hash，每日資料更新就會變，
 	 * 用戶會誤以為係新版 app。版本號必須只隨**程式碼**改動而變。
 	 */
-	const VERSION_FALLBACK = '1.3.0';
+	const VERSION_FALLBACK = '1.4.0';
 	let APP_VERSION = VERSION_FALLBACK;
 
 	function renderVersion() {
@@ -360,6 +363,8 @@
 		if (page === 'page-nearby') return !!state.place;
 		if (page === 'page-eta') return !!state.stop;
 		if (page === 'page-route') return !!state.route;
+		// M12：trip 頁要有起終點先撐得起畫面（計劃書 §3.5）
+		if (page === 'page-trip') return !!(state.trip && state.trip.origin && state.trip.dest);
 		return true;
 	}
 
@@ -379,6 +384,8 @@
 			return;
 		}
 		if (page === 'page-route' && state.routeSel) startRoutePolling();
+		// M12：返回 trip 頁時用已有 state 重繪方案（planTrip 純記憶體，零成本重跑）
+		if (page === 'page-trip') { renderTrip(); return; }
 	}
 
 	/** 當前 history 項是否由本 app 擁有（可以安全 history.back()） */
@@ -885,6 +892,108 @@
 
 	/* ============ M3 附近站列表 ============ */
 
+	/* ============ M11 一鍵定位（ADR-002） ============ */
+
+	/** getCurrentPosition timeout（計劃書 §4 共用常數） */
+	const GEO_TIMEOUT = 10000;
+
+	function geoSupported() { return typeof navigator !== 'undefined' && 'geolocation' in navigator; }
+
+	/**
+	 * 取得 GPS 位置（Promise 包裝）。
+	 * ⚠️ 隱私鐵律（ADR-002）：座標只喺本機用 Haversine 算距離，絕對唔傳任何第三方 ——
+	 *    附近站計算純前端零網絡，Nominatim 只收地標文字。
+	 */
+	function getGeoPos() {
+		return new Promise((resolve, reject) => {
+			navigator.geolocation.getCurrentPosition(resolve, reject, {
+				enableHighAccuracy: true, timeout: GEO_TIMEOUT, maximumAge: 60000
+			});
+		});
+	}
+
+	/**
+	 * 定位失敗分類降級（計劃書 §2.2）—— 唔可以一律「失敗」。
+	 * 1=拒絕授權（教育提示手動搜尋）；2=訊號唔到；3=逾時（可重試）。
+	 */
+	function handleGeoError(e) {
+		const code = e && e.code;
+		if (code === 1) toast('未能取得定位，可用商場／大廈名搜尋附近站');
+		else if (code === 2) toast('定位暫時唔到，請稍後再試或用手動搜尋');
+		else if (code === 3) toast('定位逾時，請再試一次或用手動搜尋');
+		else toast('定位失敗，請用手動搜尋');
+	}
+
+	/** place-bar 顯示文字：GPS 定位時連精度一齊顯示（計劃書 §2.1） */
+	function placeLabel(p) {
+		return p && p.acc != null ? `${p.name} ±${p.acc} 米` : (p ? p.name : '');
+	}
+
+	/** range-seg 選鈕與 state.radius 同步（locateMe override 200 後 UI 要跟） */
+	function syncRangeSeg() {
+		for (const x of $('range-seg').children) x.classList.toggle('on', +x.dataset.r === state.radius);
+	}
+
+	/** 搜尋頁「📍 用我位置」：成功 → 跳現有 nearby 頁，半徑 200 米起步（用戶指定） */
+	async function locateMe() {
+		if (!geoSupported()) return;
+		const btn = $('locate-btn');
+		btn.disabled = true;
+		try {
+			const pos = await getGeoPos();
+			const p = {
+				name: '目前位置',
+				lat: pos.coords.latitude, lng: pos.coords.longitude,
+				acc: Math.round(pos.coords.accuracy)
+			};
+			state.radius = 200;   // 只喺此入口 override，唔改 range 預設語義
+			await openNearby(p);
+			syncRangeSeg();
+		} catch (e) {
+			handleGeoError(e);
+		} finally {
+			btn.disabled = false;
+		}
+	}
+
+	/** nearby 頁「重新定位」：原地重跑 GPS，唔使返回搜尋頁 */
+	async function relocateMe() {
+		if (!geoSupported()) return;
+		const btn = $('nb-relocate');
+		btn.classList.add('spin');
+		try {
+			const pos = await getGeoPos();
+			const p = {
+				name: '目前位置',
+				lat: pos.coords.latitude, lng: pos.coords.longitude,
+				acc: Math.round(pos.coords.accuracy)
+			};
+			state.place = p;
+			$('nb-place').textContent = placeLabel(p);
+			renderNearby();   // 地圖已開啟時 renderNearby 內部會同步重繪
+			toast('已重新定位');
+		} catch (e) {
+			handleGeoError(e);
+		} finally {
+			btn.classList.remove('spin');
+		}
+	}
+
+	$('locate-btn').addEventListener('click', locateMe);
+	$('nb-relocate').addEventListener('click', relocateMe);
+
+	// 唔支援 geolocation（舊瀏覽器）→ 隱藏定位掣 + tooltip（計劃書 §2.2）
+	if (!geoSupported()) {
+		for (const id of ['locate-btn', 'trip-gps']) {
+			const el = $(id);
+			if (el) el.hidden = true;
+		}
+		const rl = $('nb-relocate');
+		if (rl) { rl.disabled = true; rl.title = '此瀏覽器唔支援定位，請用手動搜尋'; }
+	}
+
+	/* ============ M3 附近站列表（接續） ============ */
+
 	// nearby 頁只有上一層（搜尋頁），所以 fallback 直接寫死 search
 	$('nb-back').addEventListener('click', () => goBack('page-search'));
 	$('range-seg').addEventListener('click', (e) => {
@@ -899,7 +1008,8 @@
 		await boot();
 		if (!DB) return;
 		state.place = place;
-		$('nb-place').textContent = place.name;
+		// GPS 定位入口時顯示「目前位置 ±acc 米」（M11）
+		$('nb-place').textContent = placeLabel(place);
 		$('nb-sub').textContent = '';
 		go('nearby');
 		renderNearby();
@@ -1909,6 +2019,227 @@ function setRouteDir(dir, svc, ctx, hint) {
 		state.routeAbort?.abort();
 	}
 
+	/* ============ M12 點到點路線查詢（ADR-001） ============ */
+
+	/** trip 頁建議清單 debounce（與搜尋頁同一理由：官方 1 req/s，先 debounce 後硬節流） */
+	const TRIP_SUG_DEBOUNCE_MS = 600;
+
+	/** 公司短名（跨公司轉車標籤用） */
+	const CO_SHORT = { kmb: '九巴', ctb: '城巴' };
+
+	/**
+	 * 共用地標搜尋元件（計劃書 §3.3）：Nominatim 搜尋 + 候選點 + 多層快取
+	 * 全部經 B.searchPlaceRatelimited（data.js 的節流 + LRU + localStorage 快取層，
+	 * 與搜尋頁共用同一份緩存 —— 唔複製邏輯，只重構出輸入框層級的 DOM 處理）。
+	 *
+	 * @param {HTMLInputElement} inputEl 輸入框
+	 * @param {HTMLElement} sugEl 建議清單容器（絕對定位喺輸入框下）
+	 * @param {(pt:{name,lat,lng})=>void} onPick 揀中候選點
+	 */
+	function searchPoint(inputEl, sugEl, onPick) {
+		let abort = null;
+		let timer = null;
+		const hide = () => { sugEl.hidden = true; sugEl.innerHTML = ''; };
+		inputEl.addEventListener('input', () => {
+			clearTimeout(timer);
+			abort?.abort();
+			const v = inputEl.value.trim();
+			if (v.length < 2) { hide(); return; }
+			timer = setTimeout(async () => {
+				abort = new AbortController();
+				sugEl.hidden = false;
+				sugEl.innerHTML = '<div class="sug-loading">搜尋中…</div>';
+				try {
+					const { list } = await B.searchPlaceRatelimited(v, abort.signal, adapter.id);
+					if (!list.length) {
+						sugEl.innerHTML = '<div class="sug-loading">搵唔到，試下加區名（例如「某某 旺角」）</div>';
+						return;
+					}
+					// 最近巴士站距離：幫用戶判斷命中點係咪門口（同搜尋頁準則一致）
+					if (DB) {
+						for (const c of list) {
+							const n = B.findNearbyStops(DB, c, 500).slice(0, 1)[0];
+							c.nearest = n ? n.distance : null;
+						}
+					}
+					sugEl.innerHTML = list.slice(0, 8).map((c, i) =>
+						`<button class="sug-item" data-i="${i}">
+							<span class="sug-name">${esc(c.name)}</span>
+							<span class="sug-meta">${c.nearest != null ? `最近巴士站 ${c.nearest} 米` : '附近未見巴士站'}</span>
+						</button>`).join('');
+					sugEl.querySelectorAll('.sug-item').forEach((b) => b.addEventListener('click', () => {
+						const c = list[+b.dataset.i];
+						inputEl.value = c.name;
+						hide();
+						onPick({ name: c.name, lat: c.lat, lng: c.lng });
+					}));
+				} catch (e) {
+					if (e.name === 'AbortError') return;
+					sugEl.innerHTML = '<div class="sug-loading">搜尋失敗，請稍後再試</div>';
+				}
+			}, TRIP_SUG_DEBOUNCE_MS);
+		});
+	}
+
+	function setTripEndpoint(role, pt) {
+		state.trip = state.trip || { origin: null, dest: null, result: null, capped: false };
+		state.trip[role] = pt;
+		state.trip.result = null;
+		renderTrip();
+	}
+
+	/** 由 state.trip 回填輸入框（跳轉帶入 endpoint / 返回頁面重繪時用） */
+	function syncTripInputs() {
+		const t = state.trip;
+		$('trip-origin').value = t && t.origin ? t.origin.name : '';
+		$('trip-dest').value = t && t.dest ? t.dest.name : '';
+	}
+
+	/**
+	 * 進入 trip 頁。opts.preset = { role:'origin'|'dest', co, stop } 由 ETA／路線頁帶入某站。
+	 * ⚠️ 入口一律開新查詢（state.trip=null 再帶入 preset）—— 殘留舊終點會令用戶以為
+	 *    「幫我查咗上次的嘢」，行為可預測性優先。
+	 */
+	async function openTrip(opts) {
+		const o = opts || {};
+		await boot();
+		stopPolling();
+		stopRoutePolling();
+		if (o.preset) {
+			const { role, co, stop } = o.preset;
+			const s = DBS[co] && DBS[co].stopById.get(stop);
+			if (s) {
+				state.trip = { origin: null, dest: null, result: null, capped: false };
+				state.trip[role] = { co, stop, name: s.name, lat: s.lat, lng: s.lng };
+			} else {
+				toast('搵唔到該站資料');
+			}
+		}
+		go('trip');
+		renderTrip();
+	}
+
+	function renderTrip() {
+		if (!DBS || !Object.keys(DBS).length) return;   // boot 未完成（極端時序守衛）
+		syncTripInputs();
+		const st = $('trip-status');
+		const box = $('trip-results');
+		const t = state.trip;
+		if (!t || !t.origin || !t.dest) {
+			st.innerHTML = '<div class="trip-hint">輸入起點同終點（或撳右邊 📍 用我位置做起點），自動搵直達或轉一次車嘅巴士路線。</div>';
+			box.innerHTML = '';
+			return;
+		}
+		const res = B.planTrip(DBS, t.origin, t.dest, { maxTransfers: 1 });
+		t.result = res;
+		t.capped = res.capped;
+		st.innerHTML = '';
+		if (!res.plans.length) {
+			// 空結果提示（計劃書 §3.4）
+			box.innerHTML = emptyBox(
+				res.reason === 'noStops' ? '起點或終點 500 米內搵唔到巴士站' : '搵唔到 1 次轉車以內嘅巴士路線',
+				res.reason === 'noStops'
+					? '試下入近啲嘅地標做起點／終點，或者改用附近 200 米內嘅站。'
+					: '呢兩點可能需超過 1 次轉車，或適合搭其他交通工具（港鐵／小巴）。');
+			return;
+		}
+		const plans = res.plans.slice(0, 8);
+		box.innerHTML = plans.map((p, i) => renderPlanCard(p, i)).join('') +
+			(res.capped ? '<div class="trip-cap">路線較複雜，只顯示直達方案，建議分段查</div>' : '');
+		// 撳上車站 → 該站 ETA（必須帶 co —— 跨公司 co 鐵律）
+		box.querySelectorAll('.leg').forEach((b) => {
+			b.addEventListener('click', () => {
+				const p = plans[+b.dataset.p];
+				const leg = p && p.legs[+b.dataset.l];
+				if (!leg) return;
+				openEta({
+					stop: leg.from.stop, co: leg.from.co, name: leg.from.name,
+					lat: leg.from.lat, lng: leg.from.lng
+				});
+			});
+		});
+	}
+
+	/**
+	 * 方案卡（決策乙）：只顯示元數據（轉車次數／站數／步行距離），
+	 * **絕不顯示預估總時間**（計劃書 §3.4）。
+	 */
+	function renderPlanCard(p, idx) {
+		const head = p.transfers === 0 ? '直達' : `轉 ${p.transfers} 次`;
+		const walkTotal = p.walkOriginM + p.walkDestM;
+		const legs = [];
+		p.legs.forEach((leg, li) => {
+			if (li > 0) {
+				const prev = p.legs[li - 1];
+				const xferTxt = prev.co === leg.co
+					? '同站轉車'
+					: `轉 ${CO_SHORT[prev.co] || prev.co}↔${CO_SHORT[leg.co] || leg.co}`;
+				legs.push(`<div class="xfer">${esc(xferTxt)}</div>`);
+			}
+			const a = B.getAdapter(leg.co);
+			legs.push(`<button class="leg" data-p="${idx}" data-l="${li}" title="查看 ${esc(splitCode(leg.from.name).base)} 實時到站時間">
+				<span class="leg-line">
+					<i class="co-dot ${esc(leg.co)}" title="${esc(a ? a.label : leg.co)}"></i>
+					<b class="leg-no">${esc(leg.route)}</b>
+					<span class="leg-dest">往 ${esc(leg.dest || '—')}</span>
+					<span class="leg-n">${leg.stops} 站</span>
+				</span>
+				<span class="leg-pts">
+					<span class="pt up">${esc(splitCode(leg.from.name).base)}</span>
+					<span class="pt down">${esc(splitCode(leg.to.name).base)}</span>
+				</span>
+			</button>`);
+		});
+		return `<div class="card plan">
+			<div class="plan-head">
+				<span class="plan-title">${esc(head)}</span>
+				<span class="plan-meta">共 ${p.totalStops} 站${walkTotal ? ` · 步行約 ${walkTotal} 米` : ''}</span>
+			</div>
+			${p.walkOriginM ? `<div class="walk">起點 → 上車站：步行約 ${p.walkOriginM} 米</div>` : ''}
+			<div class="plan-legs">${legs.join('')}</div>
+			${p.walkDestM ? `<div class="walk">落車站 → 終點：步行約 ${p.walkDestM} 米</div>` : ''}
+		</div>`;
+	}
+
+	/* --- M12 接線 --- */
+
+	$('trip-entry').addEventListener('click', () => { state.trip = null; openTrip(); });
+	$('trip-back').addEventListener('click', () => goBack('page-search'));
+	// ETA 頁「查去處」：以當前站做起點（⚠️ 必須帶 co —— 跨公司 stop ID 鐵律）
+	$('eta-trip').addEventListener('click', () => {
+		const s = state.stop;
+		if (!s) return;
+		state.trip = null;
+		openTrip({ preset: { role: 'origin', co: s.co || adapter.id, stop: s.stop } });
+	});
+	// 路線頁「查去處」：以選中站做起點（未選站先提示）
+	$('rt-trip').addEventListener('click', () => {
+		const s = state.routeSel;
+		if (!s) { toast('請先揀一個車站，再查去處'); return; }
+		state.trip = null;
+		openTrip({ preset: { role: 'origin', co: (state.route && state.route.co) || adapter.id, stop: s.stop } });
+	});
+	// 起點欄 📍：復用 M11 的 GPS 取位與錯誤降級
+	$('trip-gps').addEventListener('click', async () => {
+		if (!geoSupported()) return;
+		const btn = $('trip-gps');
+		btn.classList.add('spin');
+		try {
+			const pos = await getGeoPos();
+			setTripEndpoint('origin', {
+				name: '目前位置',
+				lat: pos.coords.latitude, lng: pos.coords.longitude,
+				acc: Math.round(pos.coords.accuracy)
+			});
+		} catch (e) {
+			handleGeoError(e);
+		} finally {
+			btn.classList.remove('spin');
+		}
+	});
+	searchPoint($('trip-origin'), $('trip-origin-sug'), (pt) => setTripEndpoint('origin', pt));
+	searchPoint($('trip-dest'), $('trip-dest-sug'), (pt) => setTripEndpoint('dest', pt));
+
 	/* ============ 地圖（M3 附屬） ============ */
 
 	let map = null, mapLayer = null, mapCenter = null, tileErr = 0;
@@ -2004,10 +2335,22 @@ function setRouteDir(dir, svc, ctx, hint) {
 			fillColor: '#b3121b', fillOpacity: .05
 		}).addTo(mapLayer);
 
-		// 地標 marker
-		L.marker([place.lat, place.lng], {
-			icon: L.divIcon({ className: '', html: '<div class="mkr me"></div>', iconSize: [18, 18], iconAnchor: [9, 9] })
-		}).addTo(mapLayer);
+		// 圓心 marker（M11）：GPS 定位時改藍點「我」＋半透明精度圈（clamp 50–500 米），
+		// 與地標紅點、九巴／城巴 pin 區分；普通地標圓心維持品牌紅點。
+		if (mapCenter.place.acc != null) {
+			const acc = Math.min(500, Math.max(50, mapCenter.place.acc));
+			L.circle([place.lat, place.lng], {
+				radius: acc, color: '#1a73e8', weight: 1, opacity: .6,
+				fillColor: '#1a73e8', fillOpacity: .1
+			}).addTo(mapLayer);
+			L.marker([place.lat, place.lng], {
+				icon: L.divIcon({ className: '', html: '<div class="mkr me gps">我</div>', iconSize: [26, 26], iconAnchor: [13, 13] })
+			}).addTo(mapLayer);
+		} else {
+			L.marker([place.lat, place.lng], {
+				icon: L.divIcon({ className: '', html: '<div class="mkr me"></div>', iconSize: [18, 18], iconAnchor: [9, 9] })
+			}).addTo(mapLayer);
+		}
 
 		// 站點 marker：顏色按距離分層
 		// 同名站以聚合標籤顯示（避免 5 個行車位標記重疊）
