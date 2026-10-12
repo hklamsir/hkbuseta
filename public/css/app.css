@@ -654,6 +654,15 @@ body {
 .foot a { color: var(--text-3); }
 .foot .link { cursor: pointer; text-decoration: underline; }
 
+/* 版本號：置於頁尾最底，弱化顯示但要睇得見 */
+.ver {
+	margin-top: 10px;
+	font-size: 11px;
+	color: var(--text-3);
+	opacity: .8;
+	letter-spacing: .02em;
+}
+
 .offline-note {
 	display: inline-flex;
 	align-items: center;

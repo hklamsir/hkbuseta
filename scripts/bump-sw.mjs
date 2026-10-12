@@ -26,6 +26,41 @@ import { createHash } from 'node:crypto';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SW = join(ROOT, 'public', 'sw.js');
 
+/* ---------- 版本號一致性閘門（M10） ---------- */
+
+/**
+ * 版本號必須喺三個地方一致，否則用戶會見到矛盾嘅版本：
+ *   1. public/manifest.json 的 version ← **單一真相來源**（app 執行時讀佢）
+ *   2. package.json 的 version        ← npm / GitHub Releases 用
+ *   3. public/js/app.js 的 VERSION_FALLBACK ← manifest 讀唔到時嘅離線後備
+ *
+ * ⚠️ 為何要有閘門：三者係分開嘅檔案，改版時漏改一個就會出現
+ *    「安裝畫面顯示 1.2.0 但頁尾顯示 1.1.0」嘅情況（用戶無從判斷係咪新版）。
+ */
+const pkg = JSON.parse(await readFile(join(ROOT, 'package.json'), 'utf8'));
+const mani = JSON.parse(await readFile(join(ROOT, 'public', 'manifest.json'), 'utf8'));
+const appSrc = await readFile(join(ROOT, 'public', 'js', 'app.js'), 'utf8');
+const fb = appSrc.match(/const VERSION_FALLBACK = '([^']+)'/)?.[1];
+
+const versions = {
+	'public/manifest.json': mani.version,
+	'package.json': pkg.version,
+	'public/js/app.js (VERSION_FALLBACK)': fb
+};
+const missing = Object.entries(versions).filter(([, v]) => !v).map(([k]) => k);
+if (missing.length) {
+	console.error(`❌ 搵唔到版本號：${missing.join(' / ')}`);
+	process.exit(1);
+}
+const distinct = [...new Set(Object.values(versions))];
+if (distinct.length > 1) {
+	console.error('❌ 版本號三處不一致，改版時必須同步：');
+	for (const [k, v] of Object.entries(versions)) console.error(`     ${k.padEnd(34)} ${v}`);
+	console.error('   （單一真相來源係 public/manifest.json 的 version）');
+	process.exit(1);
+}
+console.log(`✅ 版本號一致：v${mani.version}`);
+
 /** 與 sw.js 的 VERSIONED 保持一致 */
 const VERSIONED = [
 	'public/index.html',

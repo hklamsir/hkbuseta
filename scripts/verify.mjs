@@ -1285,10 +1285,103 @@ ok(sw.registered, 'Service Worker 已註冊', sw.scope);
 const mani = await page.evaluate(async () => {
 	const res = await fetch('manifest.json');
 	const j = await res.json();
-	return { name: j.name, icons: j.icons.length, display: j.display };
+	return { name: j.name, icons: j.icons.length, display: j.display, version: j.version };
 });
 ok(mani.display === 'standalone', 'manifest 為 standalone', mani.name);
 ok(mani.icons >= 4, '圖示齊備', `${mani.icons} 個`);
+
+/* ---------- 9b. 版本號 + History API（M10） ---------- */
+console.log('\n[9b] 版本號顯示 + 上一頁不離開 app');
+// ⚠️ 先 reload 返搜尋頁：.foot（含版本號）只喺 page-search 顯示，
+//    而且前一段測試結束時停喺 ETA 頁，唔 reload 就驗證唔到。
+//    順便驗證「reload 後 history 項會對齊返搜尋頁」（M10 修正項）。
+await page.reload({ waitUntil: 'networkidle' });
+await page.waitForFunction(() => document.getElementById('data-stamp')?.textContent?.includes('車站'), { timeout: 25000 });
+await page.waitForTimeout(400);
+
+const verUI = await page.evaluate(() => ({
+	text: document.getElementById('app-version')?.textContent || '',
+	inFoot: !!document.getElementById('app-version')?.closest('.foot'),
+	visible: (() => {
+		const el = document.getElementById('app-version');
+		if (!el) return false;
+		const r = el.getBoundingClientRect();
+		return r.width > 0 && r.height > 0;
+	})()
+}));
+ok(verUI.inFoot, '版本號位於首頁底部 .foot 區塊');
+ok(/^版本 \d+\.\d+\.\d+$/.test(verUI.text), '版本號格式正確（版本 X.Y.Z）', verUI.text);
+ok(verUI.text === `版本 ${mani.version}`, '頁面版本號與 manifest.json 一致', `${verUI.text} / ${mani.version}`);
+ok(verUI.visible, '版本號實際可見（非 display:none）', verUI.text);
+
+/* ---------- 9c. 瀏覽器上一頁逐層返回 ---------- */
+console.log('\n[9c] History API：上一頁逐層返回');
+// ⚠️ 用 history.back()（等同手機返回鍵 / 瀏覽器上一頁），
+//    唔係撳 app 內嘅返回鈕 —— 目標係證明**系統返回鍵**會喺 app 內逐層返回，
+//    而唔係直接關閉 app（呢個係用戶回報的原問題）。
+const hInit = await page.evaluate(() => ({
+	owned: !!history.state?.buseta,
+	page: history.state?.page || '',
+	len: history.length
+}));
+ok(hInit.owned, 'history 項已標記為 app 所有（返回鈕可安全 history.back）', hInit.page);
+ok(hInit.page === 'page-search', 'history 項指向搜尋頁（reload 後已對齊）', hInit.page);
+
+// 由搜尋頁 → nearby → ETA，層層 push
+await page.click('#recent [data-r="0"]');
+await page.waitForFunction(() => document.getElementById('page-nearby')?.classList.contains('active'), { timeout: 15000 });
+await page.waitForTimeout(500);
+await page.click('#nb-list .stop');
+await page.waitForSelector('#eta-list .eta-row, #eta-list .empty, #eta-list .error-box', { timeout: 30000 });
+await page.waitForTimeout(400);
+const hDepth3 = await page.evaluate(() => ({ len: history.length, page: history.state?.page }));
+ok(hDepth3.page === 'page-eta', '每次跳頁都有 push 一層 history', `${hDepth3.page}（depth ${hDepth3.len}）`);
+
+// 系統返回：ETA → nearby
+await page.evaluate(() => history.back());
+await page.waitForTimeout(800);
+const back1 = await page.evaluate(() => ({
+	nearby: document.getElementById('page-nearby')?.classList.contains('active'),
+	eta: document.getElementById('page-eta')?.classList.contains('active'),
+	page: history.state?.page,
+	// DOM 仍在 = 頁面無重新載入 = 確定無離開 app
+	domAlive: !!document.getElementById('page-search')
+}));
+ok(back1.nearby && !back1.eta, '上一頁：ETA → 附近站（無離開 app）', back1.page);
+ok(back1.domAlive, '上一頁未觸發頁面重載（確定無離開 app）', '');
+
+// 系統返回：nearby → 搜尋頁
+await page.evaluate(() => history.back());
+await page.waitForTimeout(800);
+const back2 = await page.evaluate(() => ({
+	search: document.getElementById('page-search')?.classList.contains('active'),
+	nearby: document.getElementById('page-nearby')?.classList.contains('active'),
+	page: history.state?.page,
+	recentShown: document.querySelectorAll('#recent [data-r]').length > 0
+}));
+ok(back2.search && !back2.nearby, '上一頁：附近站 → 搜尋頁（無離開 app）', back2.page);
+ok(back2.recentShown, '返回搜尋頁後已重繪最近搜尋（restorePage 副作用生效）', '');
+
+// 返回鈕與系統返回鍵必須行同一條 stack（否則用戶會「來回彈」）
+await page.click('#recent [data-r="0"]');
+await page.waitForFunction(() => document.getElementById('page-nearby')?.classList.contains('active'), { timeout: 15000 });
+await page.waitForTimeout(500);
+const beforeBtnBack = await page.evaluate(() => history.length);
+await page.click('#nb-back');
+await page.waitForTimeout(800);
+const afterBtnBack = await page.evaluate(() => ({
+	search: document.getElementById('page-search')?.classList.contains('active'),
+	len: history.length,
+	page: history.state?.page
+}));
+ok(afterBtnBack.search, 'app 內返回鈕：附近站 → 搜尋頁', afterBtnBack.page);
+// ⚠️ history.length 係 stack **總深度**，back() 只移動指標唔會令它減少；
+//    只有 pushState 會增長（並截斷 forward）。
+//    所以正確斷言係「返回鈕**冇**令 stack 變深」——
+//    若返回鈕自己 go() 再 push 一層，length 會 +1，用戶隨後撳系統返回就會彈返返去。
+ok(afterBtnBack.len === beforeBtnBack,
+	'返回鈕用 history.back()（stack 深度不變 = 冇另 push 一層）',
+	`${beforeBtnBack} → ${afterBtnBack.len}`);
 
 /* ---------- 10. Console 錯誤 ---------- */
 console.log('\n[10] Console 檢查');

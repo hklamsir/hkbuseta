@@ -150,6 +150,42 @@
 		if (meta) meta.setAttribute('content', br.brand);
 		const attr = $('data-attribution');
 		if (attr) attr.innerHTML = ATTRIBUTION;
+		renderVersion();
+	}
+
+	/**
+	 * 顯示用版本號。
+	 *
+	 * ⚠️ **單一真相來源係 public/manifest.json 的 version**，VERSION_FALLBACK 只係
+	 *    讀唔到 manifest 時（首次安裝離線等）的後備。scripts/bump-sw.mjs 有
+	 *    「三處版本必須一致」閘門（manifest.json / package.json / 呢個常數），
+	 *    改版時唔會靜靜漏改。
+	 *
+	 * 為何唔直接顯示 buildId：buildId 係**離線資料**的內容 hash，每日資料更新就會變，
+	 * 用戶會誤以為係新版 app。版本號必須只隨**程式碼**改動而變。
+	 */
+	const VERSION_FALLBACK = '1.1.0';
+	let APP_VERSION = VERSION_FALLBACK;
+
+	function renderVersion() {
+		const el = $('app-version');
+		if (el) el.textContent = `版本 ${APP_VERSION}`;
+	}
+
+	/**
+	 * 由 manifest.json 讀取真實版本號覆蓋後備值。
+	 * manifest.json 已被 Service Worker 預快取（SHELL 清單內），故離線一樣讀到。
+	 */
+	async function loadVersion() {
+		try {
+			const m = await (await fetch('manifest.json', { cache: 'no-cache' })).json();
+			if (m.version) {
+				APP_VERSION = m.version;
+				renderVersion();
+			}
+		} catch {
+			/* 離線安裝等情況：保留 VERSION_FALLBACK */
+		}
 	}
 
 	/**
@@ -282,14 +318,121 @@
 		return (state.route && DBS[state.route.co]) || DB;
 	}
 
-	/* ============ 頁面切換 ============ */
+	/* ============ 頁面切換 + 瀏覽器上一頁（M10） ============ */
 
-	function go(page) {
+	/**
+	 * 頁面切換，並與瀏覽器 History API 整合。
+	 *
+	 * ⚠️ 背景（用戶回報的問題）：原本頁面切換**只係改 CSS class**，完全冇碰 history →
+	 *    手機「上一頁」鍵／瀏覽器上一頁會**直接關閉整個 app**，
+	 *    用戶喺 ETA 頁或路線頁想返回上一層都做唔到。
+	 *
+	 * 解法：每次 go() 都 pushState 一層，popstate 時反向套用同一套切換 + 副作用。
+	 *
+	 * ⚠️ 返回鈕**必須**用 history.back() 而唔係自己再 go()：
+	 *    若返回鈕自己 push 一層，用戶撳「系統返回」就會跳返去剛才個頁（來回彈），
+	 *    必須兩者行同一條 stack 先一致。
+	 */
+	const BUSETA_KEY = 'buseta';
+
+	function go(page, opt) {
 		const target = page.startsWith('page-') ? page : 'page-' + page;
 		for (const p of document.querySelectorAll('.page')) p.classList.toggle('active', p.id === target);
 		window.scrollTo(0, 0);
+		if (!opt || opt.history !== false) {
+			try {
+				history.pushState({ [BUSETA_KEY]: 1, page: target }, '');
+			} catch {
+				/* 極少數環境（file://）無 History API：退回原本只切 class 的行為 */
+			}
+		}
 	}
 	function onPage(p) { return $('page-' + p).classList.contains('active'); }
+
+	/**
+	 * 目標頁是否有足夠 state 支撐顯示。
+	 * popstate 會跨越頁面重載（例如用戶在 ETA 頁重載後按返回），
+	 * 屆時 state.stop / state.place 可能已 null → 必須 fallback，唔可以顯示空白頁。
+	 */
+	function pageRenderable(page) {
+		if (page === 'page-nearby') return !!state.place;
+		if (page === 'page-eta') return !!state.stop;
+		if (page === 'page-route') return !!state.route;
+		return true;
+	}
+
+	/**
+	 * 進入頁面後要恢復的副作用（返回時必須補做，否則 ETA／路線頁返回後不會再更新）。
+	 * ⚠️ popstate 路徑同 openXxx 路徑共用呢個 → 避免兩邊漏做其中一邊。
+	 */
+	function restorePage(page) {
+		if (page === 'page-search') {
+			renderRecent();          // 常搭路線／常到車站可能有變（加星、刪除）
+			return;
+		}
+		if (page === 'page-eta' && state.stop) {
+			state.lastFetch = 0;
+			startPolling();
+			fetchEta();
+			return;
+		}
+		if (page === 'page-route' && state.routeSel) startRoutePolling();
+	}
+
+	/** 當前 history 項是否由本 app 擁有（可以安全 history.back()） */
+	function canBackInApp() {
+		try { return !!(history.state && history.state[BUSETA_KEY]); }
+		catch { return false; }
+	}
+
+	/**
+	 * 返回上一層：優先交畀 history，令畫面返回鈕與系統返回鍵行同一條 stack。
+	 * 無法用 history（例如 file:// 直接開檔）才退回原本的逐頁邏輯。
+	 */
+	function goBack(fallbackPage) {
+		if (canBackInApp()) { history.back(); return; }
+		stopPolling();
+		stopRoutePolling();
+		go(fallbackPage, { history: false });
+		restorePage(fallbackPage);
+	}
+
+	/**
+	 * 地圖開啟中（用嚟喺 popstate 判斷：上一頁應該只關地圖）。
+	 * openMap() 設 true，closeMap() / popstate 關地圖後設 false。
+	 */
+	let mapOpenState = false;
+
+	function onPopState(e) {
+		// ① 地圖層：上一頁 = 關地圖，唔可以跳頁（否則會連人帶地圖跳返上一層）
+		//    用 forward() 還原到原本的 history 位置，forward 觸發嘅 popstate 靠
+		//    mapReturnGuard 忽略，否則會二次跳頁。
+		if ($('map').classList.contains('on')) {
+			$('map').classList.remove('on');
+			if (mapOpenState) {
+				mapOpenState = false;
+				mapReturnGuard = true;
+				history.forward();
+			}
+			return;
+		}
+		if (mapReturnGuard) { mapReturnGuard = false; return; }   // forward() 觸發嘅，忽略
+
+		const st = e.state;
+
+		// ② 已離開 app（例如由外部連結進入後按返回）→ 唔阻，放行畀瀏覽器
+		if (!st || !st[BUSETA_KEY]) return;
+
+		// ③ app 內返回：停晒輪詢 → 切頁 → 恢復目標頁副作用
+		stopPolling();
+		stopRoutePolling();
+		const page = pageRenderable(st.page) ? st.page : 'page-search';
+		go(page, { history: false });
+		restorePage(page);
+	}
+
+	/** forward() 還原地圖位置期間嘅 popstate 守衛（見 onPopState ①） */
+	let mapReturnGuard = false;
 
 	/* ============ M2 地標搜尋 ============ */
 
@@ -679,7 +822,8 @@
 
 	/* ============ M3 附近站列表 ============ */
 
-	$('nb-back').addEventListener('click', () => { go('search'); renderRecent(); });
+	// nearby 頁只有上一層（搜尋頁），所以 fallback 直接寫死 search
+	$('nb-back').addEventListener('click', () => goBack('page-search'));
 	$('range-seg').addEventListener('click', (e) => {
 		const b = e.target.closest('button');
 		if (!b) return;
@@ -889,24 +1033,28 @@
 
 	/* ============ M4 ETA 頁 ============ */
 
+	/**
+	 * ETA 頁返回。
+	 *
+	 * ⚠️ M10：改用 goBack()（history.back()）→ 與手機／瀏覽器上一頁行同一條 stack。
+	 *    原本自己 push 一層會令「畫面返回鈕」同「系統返回鍵」各推一層，
+	 *    用戶撳系統返回會跳返去剛才個頁（來回彈）。
+	 *
+	 * 清理（停輪詢 / 清選中站）必須喺 goBack() **之前**做：
+	 * popstate 只識得 history state，唔識得 state.etaFrom。
+	 */
 	$('eta-back').addEventListener('click', () => {
-		stopPolling();
 		const from = state.etaFrom;
 		state.etaFrom = null;
-		// 從常到車站進入 → 返回時直接回首頁，略過附近站列表
+		let target = 'page-nearby';
 		if (from === 'recent') {
-			go('search');
-			renderRecent();
-			return;
-		}
-		// 從路線頁跳轉進入 → 返回路線頁（該路線的站序仍然有用）
-		if (from === 'route') {
+			target = 'page-search';                 // 從常到車站進入 → 略過附近站
+		} else if (from === 'route') {
+			target = 'page-route';                  // 從路線頁跳轉進入 → 回路線頁
 			state.routeSel = null;
 			state.routeEta = [];
-			go('route');
-			return;
 		}
-		go('nearby');
+		goBack(target);
 	});
 	$('eta-refresh').addEventListener('click', () => { state.lastFetch = 0; fetchEta(); });
 
@@ -1217,18 +1365,19 @@
 
 	/* ============ M7 路線詳情頁 ============ */
 
+	/**
+	 * 路線頁返回。
+	 * ⚠️ M10：同 eta-back 一樣改用 goBack()，令兩種返回鍵共用同一條 history stack。
+	 */
 	$('rt-back').addEventListener('click', () => {
-		stopRoutePolling();
-		// 從常搭路線進入 → 返回時直接回首頁
+		let target = 'page-eta';
 		if (state.routeFrom === 'recent') {
 			state.routeFrom = null;
 			state.routeSel = null;
 			state.routeEta = [];
-			go('search');
-			renderRecent();
-			return;
+			target = 'page-search';      // 從常搭路線進入 → 返回時直接回首頁
 		}
-		go('eta');
+		goBack(target);
 	});
 	$('rt-refresh').addEventListener('click', () => { state.routeLastFetch = 0; fetchRouteStopEta(); });
 	$('rt-fav').addEventListener('click', () => {
@@ -1627,11 +1776,17 @@ function setRouteDir(dir, svc, ctx, hint) {
 
 $('nb-map').addEventListener('click', openMap);
 $('nb-map2').addEventListener('click', openMap);
-$('map-close').addEventListener('click', () => $('map').classList.remove('on'));
+$('map-close').addEventListener('click', closeMap);
+
+	function closeMap() {
+		$('map').classList.remove('on');
+		mapOpenState = false;
+	}
 
 	function openMap() {
 		const { place, radius, nearby } = state;
 		$('map').classList.add('on');
+		mapOpenState = true;
 		setTimeout(() => {
 			if (!map) {
 				map = L.map('map', { zoomControl: true, attributionControl: true })
@@ -1693,7 +1848,7 @@ $('map-close').addEventListener('click', () => $('map').classList.remove('on'));
 			// 點擊 marker 或圓點 → 跳到該站 ETA 頁（含同組所有行車位）
 			const goEta = (ev) => {
 				L.DomEvent.stop(ev);
-				$('map').classList.remove('on');
+				closeMap();
 				openEta({ stop: s.stop, name: s.name, lat: s.lat, lng: s.lng, ids: grp.map((x) => x.stop), distance: s.distance });
 			};
 			if (grp.length > 1) {
@@ -1760,9 +1915,32 @@ $('map-close').addEventListener('click', () => $('map').classList.remove('on'));
 		addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch((e) => console.warn('[sw]', e)));
 	}
 
+	/* ============ History API 接線（M10） ============ */
+
+	// 標記起始項為 app 所有 —— 否則 canBackInApp() 永遠 false，返回鈕會退回逐頁邏輯。
+	// 用 replaceState 而唔係 pushState：起始項已經存在，唔想喺首頁多墊一層空白歷史。
+	//
+	// ⚠️ **必須無條件覆寫成 page-search**，唔可以「只在 state 缺失時才寫」：
+	//    reload 唔會清空 history stack，state 會殘留 reload 前 push 嘅頁（例如 page-eta），
+	//    但 reload 後畫面一定由搜尋頁重新開始 → state 與畫面不一致，
+	//    用戶按上一頁就會跳去一個 reload 前存在、而家已經冇資料的頁面。
+	function markEntryAsSearch() {
+		try { history.replaceState({ [BUSETA_KEY]: 1, page: 'page-search' }, ''); }
+		catch { /* 無 History API（file://）：返回鈕自動走 fallback */ }
+	}
+	markEntryAsSearch();
+	addEventListener('popstate', onPopState);
+
+	// bfcache 還原（persisted=true）時**唔好**重寫：那個畫面仍有原本的 state，
+	// 覆寫會令返回目標失真。純重載（persisted=false）才重新對齊。
+	addEventListener('pageshow', (e) => { if (!e.persisted) markEntryAsSearch(); });
+
 	// 主題色必須喺 boot() 之前套用，否則首屏會有一瞬間嘅預設色閃爍。
 	// ⚠️ M9：公司切換器已移除（合併顯示兩家後，切換已無實質作用）
 	applyBranding();
+
+	// 版本號：manifest.json 為單一真相來源（已在 SW 預快取清單內，離線亦讀到）
+	loadVersion();
 
 	boot();
 })();
