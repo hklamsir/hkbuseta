@@ -1181,7 +1181,11 @@
 							};
 							const p = mkPlan(0, [leg], og.walk, dGroups[h.gi].walk);
 							p.score = (og.nm ? 1 : 0) + (dGroups[h.gi].nm ? 1 : 0);
-							// 同走廊去重 key（見上方註解：聯營合併、撞號分開）
+							// 同走廊去重 key（見上方註解：聯營合併、撞號分開）。
+							// ⚠️ 一走廊一方案（2026-10-13 三修）：key 唔可以含 svc ——
+							//    含 svc 會令同走廊多個變體（如 203C 特別班次）各自成方案，
+							//    同上落站但站數唔同（變體站序差 1）＋轉車組合重複。
+							//    svc 變體問題改由 legHasLiveEta 嘅 svc 後備檢查處理。
 							const k = idx && idx.dirs[r.route]
 								? `${r.route}|${normalizeDir(idx, r.route, r.bound, m.co).key}`
 								: `${m.co}|${r.route}|${r.bound}`;
@@ -1256,6 +1260,7 @@
 										};
 										const plan = mkPlan(1, [legA, legB], og.walk, dGroups[h.gi].walk);
 										plan.score = (og.nm ? 1 : 0) + (dGroups[h.gi].nm ? 1 : 0);
+										// 走廊級去重（2026-10-13 三修回覆：key 唔含 svc，理由同 direct）
 										const k = `${m.co}|${r.route}|${r.bound}|${p.co}|${rb.route}|${rb.bound}`;
 										const prev = bestT.get(k);
 										if (!prev || betterPlan(plan, prev)) bestT.set(k, plan);
@@ -1292,6 +1297,134 @@
 			(a.walkOriginM + a.walkDestM) - (b.walkOriginM + b.walkDestM) ||
 			a.totalStops - b.totalStops);
 		return { plans, capped, reason: null, oCount: oGroups.length, dCount: dGroups.length };
+	}
+
+	/* ============ M12 即時班次過濾（2026-10-13 用戶回饋） ============ */
+
+	/**
+	 * 背景：planTrip 係純離線靜態規劃，6P/6E 類「靜態存在但現時冇班次」嘅線
+	 * 會出現喺建議入面（用戶實測：利明樓→女青會出咗 6P/6E 轉車方案，但兩線冇車）。
+	 * 解法：出建議前如有連網，逐條 leg 查上車站即時 ETA；**確認冇班次先剔走**。
+	 *
+	 * 實證（2026-10-13 13:55 KMB API）：
+	 *   行緊嘅線（1/14/38）→ rows 帶實 eta 時間戳；
+	 *   冇班次嘅線（6P/14D）→ row eta:null（rmk 空）或空陣列。
+	 *   故判準 = `row.dir === bound && row.eta 非空`。
+	 */
+
+	const TRIP_ETA_TTL_MS = 90 * 1000;   // 即時資料快取 90 秒（與 pollMs 量級一致）
+	const tripEtaCache = new Map();      // key → { v: true|false|null, ts }
+
+	/**
+	 * leg → 班次快取 key。跨公司鐵律：必帶 co（兩家 stop ID 命名空間不同）。
+	 * ⚠️ 走廊級（2026-10-13 三修）：唔含 svc —— 結果已涵蓋同走廊所有 svc 變體
+	 *    （legHasLiveEta 會做 svc 後備檢查）。
+	 */
+	function tripEtaKey(leg) {
+		return `${leg.co}|${leg.from.stop}|${leg.route}|${leg.bound}`;
+	}
+
+	/** 單一 svc 嘅即時班次檢查：該 (co,stop,route,svc,bound) 而家有冇車 */
+	async function svcHasEta(a, stop, route, bound, svc, signal) {
+		const rows = await a.fetchSingleStopEta(stop, route, svc, signal);
+		return rows.some((r) => r.dir === bound && r.eta);
+	}
+
+	/** 同 (co,route,bound) 嘅所有 svc 變體（由離線 routeList 列舉） */
+	function routeSvcVariants(store, route, bound) {
+		if (!store || !store.routeList) return [];
+		const out = [];
+		for (const r of store.routeList) {
+			if (r[0] === route && r[1] === bound && !out.includes(r[2])) out.push(r[2]);
+		}
+		return out;
+	}
+
+	/**
+	 * 檢查單條 leg 而家有冇班次。
+	 * 回傳 true（有）/ false（確認冇）/ null（查唔到：離線、逾時、API 失敗、adapter 未實作）。
+	 * 用 fetchSingleStopEta（每次 ~1KB，細 30 倍——見 KMB adapter 註解）。
+	 *
+	 * svc 後備（2026-10-13 三修）：方案去重係走廊級，plan 帶住嘅 svc 可能係
+	 * 特別班次變體（而家冇行）——查完指定 svc 冇車時，逐個後備查同走廊
+	 * 其他 svc 變體，任何一個行緊都算「有車」，避免殺錯成條走廊。
+	 */
+	async function legHasLiveEta(leg, signal, store) {
+		const a = getAdapter(leg.co);
+		if (!a || typeof a.fetchSingleStopEta !== 'function') return null;
+		try {
+			if (await svcHasEta(a, leg.from.stop, leg.route, leg.bound, leg.svc, signal)) return true;
+			for (const v of routeSvcVariants(store, leg.route, leg.bound)) {
+				if (v === leg.svc) continue;
+				if (await svcHasEta(a, leg.from.stop, leg.route, leg.bound, v, signal)) return true;
+			}
+			return false;
+		} catch (e) {
+			return null;
+		}
+	}
+
+	/**
+	 * 並行檢查一組方案嘅全部 leg（key 去重、每鍵一次請求），總限時 budgetMs。
+	 * opts.stores = { kmb: store, ctb: store }（svc 後備檢查要離線 routeList）。
+	 * 回傳 Map key → true|false|null。
+	 * fail-open：離線（navigator.onLine === false）直接全 null —— 行為與純離線版一致。
+	 */
+	async function checkTripEtas(plans, opts) {
+		const budgetMs = (opts && opts.budgetMs) || 6000;
+		const stores = opts && opts.stores;
+		const avail = new Map();
+		const keys = new Set();
+		const keySvc = new Map();   // key → 代表 svc（首查用；其他變體由後備檢查覆蓋）
+		for (const p of plans) for (const l of p.legs) {
+			const k = tripEtaKey(l);
+			keys.add(k);
+			if (!keySvc.has(k)) keySvc.set(k, l.svc);
+		}
+		const todo = [];
+		for (const k of keys) {
+			const c = tripEtaCache.get(k);
+			if (c && Date.now() - c.ts < TRIP_ETA_TTL_MS) avail.set(k, c.v);
+			else todo.push(k);
+		}
+		if (!todo.length) return avail;
+		if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+			for (const k of todo) avail.set(k, null);
+			return avail;
+		}
+		const deadline = Date.now() + budgetMs;
+		await Promise.allSettled(todo.map(async (k) => {
+			const [co, stop, route, bound] = k.split('|');
+			const ctrl = new AbortController();
+			const t = setTimeout(() => ctrl.abort(), Math.max(400, deadline - Date.now()));
+			try {
+				const v = await legHasLiveEta(
+					{ co, from: { stop }, route, bound, svc: keySvc.get(k) },
+					ctrl.signal, stores && stores[co]);
+				tripEtaCache.set(k, { v, ts: Date.now() });
+				avail.set(k, v);
+			} finally {
+				clearTimeout(t);
+			}
+		}));
+		return avail;
+	}
+
+	function clearTripEtaCache() { tripEtaCache.clear(); }
+
+	/**
+	 * 純函數：按即時班次結果過濾方案。
+	 * fail-open 原則：只有「確認冇班次」（false）先剔除；
+	 * null／快取 miss 一律保留 —— 網絡失敗時唔會錯誤清空全部方案。
+	 */
+	function applyTripEtaFilter(plans, avail) {
+		const kept = [];
+		let filtered = 0;
+		for (const p of plans) {
+			if (p.legs.some((l) => avail.get(tripEtaKey(l)) === false)) { filtered++; continue; }
+			kept.push(p);
+		}
+		return { plans: kept, filtered };
 	}
 
 	/* ============ 持久化（M6） ============ */
@@ -1561,6 +1694,8 @@
 		normalizeEta, formatEta, SERVICE_LABELS,
 		// M12 點到點規劃（ADR-001）
 		planTrip, physGroups, physicalMembers, WALK_RADIUS, PLAN_CAP_STOPS, PLAN_CAP_MS, WALK_FACTOR,
+		// M12 即時班次過濾（2026-10-13 用戶回饋）
+		tripEtaKey, checkTripEtas, applyTripEtaFilter, clearTripEtaCache,
 		// mapCtbEta 匯出供 verify.mjs [CTB-2] 直接驗證兩種 raw 形狀的映射
 		mapCtbEta,
 		searchPlaceRatelimited, clearGeoCache, GEO_MIN_GAP_MS,

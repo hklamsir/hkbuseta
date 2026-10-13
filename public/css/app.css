@@ -944,24 +944,27 @@ button.menu-item:active { background: var(--surface-2); }
 
 /* ============ M11 一鍵定位 ============ */
 
-/* 搜尋頁兩個大掣入口（全寬、大觸控目標，長者友善 —— ADR-002） */
-.quick-actions { padding: 12px 0 4px; display: flex; flex-direction: column; gap: 8px; }
+/* 搜尋頁兩個大掣入口（同一列、平分寬度 —— 2026-10-13 用戶回饋；
+   字級 clamp 適應窄屏，保持大觸控目標，長者友善 —— ADR-002） */
+.quick-actions { padding: 12px 0 4px; display: flex; flex-direction: row; gap: 8px; }
 .qa-btn {
 	display: flex;
 	align-items: center;
 	justify-content: center;
-	gap: 8px;
-	width: 100%;
+	gap: 5px;
+	flex: 1;
+	min-width: 0;
+	min-height: 44px;
 	border: 1.5px solid var(--brand);
 	border-radius: 10px;
-	padding: 12px 10px;
-	font-size: 15px;
+	padding: 10px 4px;
+	font-size: clamp(11.5px, 3.3vw, 14px);
 	font-weight: 600;
 	font-family: inherit;
 	cursor: pointer;
 	transition: background .15s, opacity .15s;
 }
-.qa-btn svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
+.qa-btn svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
 .qa-btn.primary { background: var(--brand); color: #fff; }
 .qa-btn.primary:active { background: var(--brand-dark); }
 .qa-btn:not(.primary) { background: var(--brand-soft); color: var(--brand); }
@@ -1046,6 +1049,26 @@ button.menu-item:active { background: var(--surface-2); }
 .trip-field input::placeholder { color: var(--text-3); }
 .trip-field .trip-gps { width: 30px; height: 30px; flex-shrink: 0; }
 .trip-field .trip-gps svg { width: 15px; height: 15px; }
+
+/* 對調起點／終點掣：圓形，疊喺兩個輸入欄之間偏右（2026-10-13 用戶建議） */
+.trip-swap {
+	align-self: flex-end;
+	position: relative;
+	z-index: 5;
+	margin: -12px 12px -12px 0;
+	width: 32px;
+	height: 32px;
+	border: 1.5px solid var(--border);
+	border-radius: 50%;
+	background: var(--surface);
+	color: var(--brand);
+	cursor: pointer;
+	display: grid;
+	place-items: center;
+	box-shadow: var(--shadow-lg);
+}
+.trip-swap:active { background: var(--brand-soft); }
+.trip-swap svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 
 /* 建議清單：絕對定位喺輸入框正下方 */
 .trip-sug {

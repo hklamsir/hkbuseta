@@ -168,7 +168,7 @@
 	 * 為何唔直接顯示 buildId：buildId 係**離線資料**的內容 hash，每日資料更新就會變，
 	 * 用戶會誤以為係新版 app。版本號必須只隨**程式碼**改動而變。
 	 */
-	const VERSION_FALLBACK = '1.4.2';
+	const VERSION_FALLBACK = '1.4.5';
 	let APP_VERSION = VERSION_FALLBACK;
 
 	function renderVersion() {
@@ -2150,7 +2150,9 @@ function setRouteDir(dir, svc, ctx, hint) {
 		renderTrip();
 	}
 
-	function renderTrip() {
+	let tripRenderGen = 0;             // render 世代：用戶改查詢／對調後棄掉過期結果
+
+	async function renderTrip() {
 		if (!DBS || !Object.keys(DBS).length) return;   // boot 未完成（極端時序守衛）
 		syncTripInputs();
 		const st = $('trip-status');
@@ -2161,21 +2163,63 @@ function setRouteDir(dir, svc, ctx, hint) {
 			box.innerHTML = '';
 			return;
 		}
+		const gen = ++tripRenderGen;
 		const res = B.planTrip(DBS, t.origin, t.dest, { maxTransfers: 1 });
 		t.result = res;
 		t.capped = res.capped;
-		st.innerHTML = '';
-		if (!res.plans.length) {
-			// 空結果提示（計劃書 §3.4）
-			box.innerHTML = emptyBox(
-				res.reason === 'noStops' ? '起點或終點 500 米內搵唔到巴士站' : '搵唔到 1 次轉車以內嘅巴士路線',
-				res.reason === 'noStops'
-					? '試下入近啲嘅地標做起點／終點，或者改用附近 200 米內嘅站。'
-					: '呢兩點可能需超過 1 次轉車，或適合搭其他交通工具（港鐵／小巴）。');
+		let plans = res.plans;
+		let etaFiltered = 0;
+
+		// 連網 → 出建議前檢查即時班次（2026-10-13 用戶回饋：6P/6E 靜態存在但冇車，
+		// 唔應出現喺建議）。
+		// ⚠️ 2026-10-13 二修：原本只檢查靜態排序頭 8 個方案，但渲染係「過濾後」嘅
+		//    頭 8 個——排名較深嘅死方案（N216/6P 組合）冇被檢查過，前面嘅死方案
+		//    被剔走後就浮上嚟。改為逐批檢查（每批 8 個新方案），直到累積 ≥ 8 個
+		//    存活方案或檢查完上限；離線／逾時 fail-open 照舊顯示。
+		if (plans.length && navigator.onLine) {
+			st.innerHTML = '<div class="trip-hint">檢查即時班次中…</div>';
+			box.innerHTML = '';
+			const BATCH = 8, MAX_CHECK = 120, GLOBAL_MS = 15000;
+			const deadline = Date.now() + GLOBAL_MS;
+			// avail 用「鏈式 getter」疊代合併：新批次優先、舊批次後備。
+			// 唔好 merge 入自己嘅 Map——要令 checkTripEtas 回傳嘅 Map-like
+			//（包括測試 stub）直接參與過濾查詢。
+			let avail = { get: () => undefined, forEach: () => {} };
+			let checked = 0;
+			let survivors = [];
+			while (checked < Math.min(plans.length, MAX_CHECK) && Date.now() < deadline) {
+				const batch = plans.slice(checked, checked + BATCH);
+				const a = await B.checkTripEtas(batch, { budgetMs: Math.min(4000, deadline - Date.now()), stores: DBS });
+				const prev = avail;
+				avail = {
+					get: (k) => { const v = a.get(k); return v === undefined ? prev.get(k) : v; },
+					forEach: (cb) => { prev.forEach(cb); a.forEach(cb); }
+				};
+				checked += batch.length;
+				survivors = B.applyTripEtaFilter(plans.slice(0, checked), avail).plans;
+				if (survivors.length >= 8) break;
+			}
+			if (gen !== tripRenderGen) return;   // 期間用戶已新查詢／對調 —— 棄掉過期結果
+			plans = survivors;
+			etaFiltered = checked - survivors.length;
+		}
+		st.innerHTML = etaFiltered > 0
+			? `<div class="trip-hint">已按即時班次剔除 ${etaFiltered} 條暫時冇班次嘅路線</div>`
+			: '';
+		if (!plans.length) {
+			// 空結果提示（計劃書 §3.4）；全部俾即時班次篩走係另一種解釋
+			box.innerHTML = etaFiltered > 0
+				? emptyBox('建議路線暫時全部冇班次',
+					'已按即時到站資料篩選。可能已過服務時間，稍後再試，或改搭其他交通工具（港鐵／小巴）。')
+				: emptyBox(
+					res.reason === 'noStops' ? '起點或終點 500 米內搵唔到巴士站' : '搵唔到 1 次轉車以內嘅巴士路線',
+					res.reason === 'noStops'
+						? '試下入近啲嘅地標做起點／終點，或者改用附近 200 米內嘅站。'
+						: '呢兩點可能需超過 1 次轉車，或適合搭其他交通工具（港鐵／小巴）。');
 			return;
 		}
-		const plans = res.plans.slice(0, 8);
-		box.innerHTML = plans.map((p, i) => renderPlanCard(p, i)).join('') +
+		const top = plans.slice(0, 8);
+		box.innerHTML = top.map((p, i) => renderPlanCard(p, i)).join('') +
 			(res.capped ? '<div class="trip-cap">路線較複雜，只顯示直達方案，建議分段查</div>' : '');
 		// 撳上車／落車站 → 跳去該巴士線嘅「路線詳情」頁並高亮該站
 		// （2026-10-13 用戶回饋：原本跳 ETA 頁睇唔到條線行邊，改跳路線詳情。
@@ -2183,7 +2227,7 @@ function setRouteDir(dir, svc, ctx, hint) {
 		//   → selectStop({scroll:true}) 高亮 + inline 展開該站實時 ETA。）
 		box.querySelectorAll('.leg .pt').forEach((b) => {
 			b.addEventListener('click', () => {
-				const p = plans[+b.dataset.p];
+				const p = top[+b.dataset.p];
 				const leg = p && p.legs[+b.dataset.l];
 				if (!leg) return;
 				const st = b.dataset.role === 'from' ? leg.from : leg.to;
@@ -2276,6 +2320,17 @@ function setRouteDir(dir, svc, ctx, hint) {
 	});
 	searchPoint($('trip-origin'), $('trip-origin-sug'), (pt) => setTripEndpoint('origin', pt));
 	searchPoint($('trip-dest'), $('trip-dest-sug'), (pt) => setTripEndpoint('dest', pt));
+
+	// 對調起點／終點（2026-10-13 用戶建議）：兩點齊備時對調後自動重跑規劃
+	$('trip-swap').addEventListener('click', () => {
+		const t = state.trip;
+		if (!t || (!t.origin && !t.dest)) return;
+		const o = t.origin;
+		t.origin = t.dest;
+		t.dest = o;
+		t.result = null;
+		renderTrip();
+	});
 
 	/* ============ 地圖（M3 附屬） ============ */
 

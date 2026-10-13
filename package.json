@@ -1,6 +1,6 @@
 {
 	"name": "hkbuseta",
-	"version": "1.4.2",
+	"version": "1.4.5",
 	"private": true,
 	"description": "BusETA — 香港九巴／龍運巴士到站時間 PWA（純靜態前端）",
 	"type": "module",

@@ -35,6 +35,7 @@
 	<symbol id="i-chev-down" viewBox="0 0 24 24"><path d="M5 9l7 7 7-7"/></symbol>
 	<symbol id="i-wifi" viewBox="0 0 24 24"><path d="M4.5 9.8a11 11 0 0 1 15 0M7.6 13a6.5 6.5 0 0 1 8.8 0M10.7 16.2a2.8 2.8 0 0 1 2.6 0"/><circle cx="12" cy="18.8" r="1.1"/></symbol>
 	<symbol id="i-doc" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h6"/></symbol>
+	<symbol id="i-swap" viewBox="0 0 24 24"><path d="M8 19V6M8 6L4.8 9.2M8 6l3.2 3.2"/><path d="M16 5v13m0 0l-3.2-3.2M16 18l3.2-3.2"/></symbol>
 </svg>
 
 <div id="app">
@@ -242,6 +243,10 @@
 				</button>
 				<div class="trip-sug" id="trip-origin-sug" hidden></div>
 			</div>
+			<!-- 對調起點／終點（2026-10-13 用戶建議）：疊喺兩欄之間 -->
+			<button class="trip-swap" id="trip-swap" aria-label="對調起點同終點" title="對調起點同終點">
+				<svg><use href="#i-swap"/></svg>
+			</button>
 			<div class="trip-field">
 				<span class="dot d"></span>
 				<input type="search" id="trip-dest" placeholder="終點：輸入地標" autocomplete="off"
