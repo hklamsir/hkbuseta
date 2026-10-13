@@ -1657,6 +1657,16 @@ const tripAlgo = await page.evaluate(() => {
 	out.directDedup = dKeys.length === new Set(dKeys).size;
 	out.legValid = out.direct.every((p) => p.legs.every((l) => l.stops > 0 && l.from.seq < l.to.seq));
 
+	// [TRIP-11] 上車站最近優先（2026-10-13 用戶回饋迴歸）：
+	// 起點 = 路線 1 站序首站座標（步行 0）→ route 1 直達方案必須由該站上車，
+	// 唔可以因「站數最少」反而揀遠處嘅同線站（實測 290A 中伏案例）
+	{
+		const r11 = B.planTrip(DBS, { lat: sA.lat, lng: sA.lng }, { lat: sB.lat, lng: sB.lng }, {});
+		const d11 = r11.plans.find((p) => p.transfers === 0 && p.legs[0].route === '1');
+		out.nearestBoard = d11 ? { stop: d11.legs[0].from.stop, walk: d11.walkOriginM } : null;
+		out.nearestExpect = sA.stop;
+	}
+
 	// [TRIP-5/6/7] 觀塘 → 筲箕灣（計劃書 §6 指定一轉案例）
 	const findStop = (kw) => {
 		for (const s of kmb.stopById.values()) if (s.name.includes(kw)) return s;
@@ -1674,6 +1684,41 @@ const tripAlgo = await page.evaluate(() => {
 		out.allValid = r2.plans.every((p) => p.legs.length === p.transfers + 1 &&
 			p.legs.every((l) => l.stops > 0 && l.from.stop && l.to.stop));
 		out.hasCtbLeg = r2.plans.some((p) => p.legs.some((l) => l.co === 'ctb'));
+	}
+
+	// [TRIP-12] 落車站名實相符優先（2026-10-13 用戶回饋）：
+	// dest「高鐵西九龍站」— OSM 命中點（匯民道）到「佐敦炮台街」直線 234 米，
+	// 近過「佐敦道,高鐵站」331 米，但站名有「高鐵」嘅候選應優先（大型街區直線失真）。
+	// 由 95 號沿線（順利邨公園上車）構造：期望落車 = 佐敦道,高鐵站，唔係炮台街。
+	{
+		const slp = findStop('順利邨公園');
+		const r12 = B.planTrip(DBS,
+			{ lat: slp.lat, lng: slp.lng, name: slp.name },
+			{ lat: 22.30407, lng: 114.16651, name: '高鐵西九龍站' }, {});
+		const d12 = r12.plans.find((p) => p.transfers === 0 && p.legs[0].route === '95');
+		out.affinity = d12 ? d12.legs[0].to.name : null;
+	}
+
+	// [TRIP-13] 跨公司撞號線唔可以混站序直達（2026-10-13 用戶回饋）：
+	// 九巴 40（荃灣↔麗港城）/ 40P（荃灣↔觀塘碼頭）唔過海唔經羅便臣道；
+	// 城巴 40（華富↔會展）/ 40P（深灣↔羅便臣道）純港島不停九龍灣站。
+	// route|bound 撞號 → 直接搜尋必須同公司站序，否則九巴 seq 配城巴 seq 假命中。
+	{
+		const klw = (() => { for (const s of kmb.stopById.values()) if (String(s.name).includes('九龍灣站')) return s; return null; })();
+		let gtw = null;
+		for (const s of DBS.ctb.stopById.values()) if (String(s.name).includes('花園台')) { gtw = s; break; }
+		out.collideFound = !!(klw && gtw);
+		if (out.collideFound) {
+			const r13 = B.planTrip(DBS,
+				{ lat: klw.lat, lng: klw.lng, name: klw.name },
+				{ lat: gtw.lat, lng: gtw.lng, name: gtw.name }, {});
+			out.collide = {
+				d40: r13.plans.filter((p) => p.transfers === 0 &&
+					(p.legs[0].route === '40' || p.legs[0].route === '40P')).length,
+				// 正確性不變式：每條 leg 內 from/to 必須同公司（一趟實體巴士單一公司站序）
+				mixedCo: r13.plans.filter((p) => p.legs.some((l) => l.from.co !== l.to.co)).length
+			};
+		}
 	}
 
 	// [TRIP-8] 多 svc：路線 40 KMB 有多個 svc 且站序唔同 —— svc≠1 變體唔可以漏判
@@ -1740,6 +1785,19 @@ ok(tripAlgo.harbour.reason === 'noStops' && tripAlgo.harbour.n === 0 && tripAlgo
 ok(tripAlgo.tinyRadius.reason === 'noStops' && tripAlgo.tinyRadius.n === 0,
 	'[TRIP-9] walkRadius 參數生效（半徑 1 米 → noStops）');
 ok(tripAlgo.ms2 <= 2000, '[TRIP-10] 效能：觀塘→筲箕灣規劃 ≤ 2 秒', `${tripAlgo.ms2}ms`);
+ok(!!tripAlgo.nearestBoard &&
+	tripAlgo.nearestBoard.stop === tripAlgo.nearestExpect &&
+	tripAlgo.nearestBoard.walk <= 30,
+	'[TRIP-11] 上車站最近優先：起點旁的站被選中（步行約 0 米）',
+	JSON.stringify(tripAlgo.nearestBoard));
+ok(!!tripAlgo.affinity && tripAlgo.affinity.includes('高鐵') && !tripAlgo.affinity.includes('炮台街'),
+	'[TRIP-12] 落車站名實相符優先：高鐵西九龍站 → 佐敦道,高鐵站（非較近嘅炮台街）',
+	tripAlgo.affinity || '(無 route 95 直達)');
+ok(tripAlgo.collideFound && tripAlgo.collide.d40 === 0,
+	'[TRIP-13] 撞號線：九龍灣站 → 花園台 無 40/40P 直達假命中',
+	JSON.stringify(tripAlgo.collide));
+ok(tripAlgo.collideFound && tripAlgo.collide.mixedCo === 0,
+	'[TRIP-13] 不變式：每條 leg 內 from/to 同公司（站序唔跨公司混搭）');
 
 /* ---------- 9e. M12 trip 頁 UI（[TRIP-UI-*]） ---------- */
 console.log('\n[9e] M12 trip 頁 UI');
@@ -1791,6 +1849,22 @@ ok(tripBackSearch, '[TRIP-UI-4] trip → 系統返回 → 搜尋頁');
 ok(tripFwd.trip && tripFwd.plans > 0, '[TRIP-UI-4] 前進回 trip 頁方案重繪（restorePage）', `${tripFwd.plans} 個方案`);
 ok(tripFwd.len === hLenTrip, '[TRIP-UI-4] 來回返回冇令 stack 變深', `${hLenTrip} → ${tripFwd.len}`);
 
+// [TRIP-UI-6] 撳上車站 → 跳「路線詳情」並高亮該站（2026-10-13 用戶回饋：
+// 原本跳 ETA 頁，用戶要睇條線行邊；改跳路線詳情 + .seq-row.sel 高亮）
+const upLabel = await page.evaluate(() => document.querySelector('#trip-results .leg .pt.up')?.textContent.trim());
+await page.click('#trip-results .leg .pt.up');
+await page.waitForFunction(() => document.getElementById('page-route')?.classList.contains('active'), { timeout: 10000 });
+await page.waitForFunction(() => document.querySelector('#rt-list .seq-row.sel'), { timeout: 10000 });
+const rtSel = await page.evaluate(() => ({
+	no: document.getElementById('rt-no').textContent,
+	sel: document.querySelector('#rt-list .seq-row.sel .nm .t')?.textContent.trim()
+}));
+ok(rtSel.sel === upLabel, '[TRIP-UI-6] 撳上車站 → 路線詳情頁並高亮該站',
+	`${rtSel.no} @ ${rtSel.sel}（期望 ${upLabel}）`);
+await page.screenshot({ path: join(SHOTS, '16-trip-leg-route.png') });
+await page.evaluate(() => history.back());   // 路線頁 → trip
+await page.waitForTimeout(600);
+
 // 站點跳轉：ETA 頁「查去處」→ 該站帶入做起點
 await page.evaluate(() => history.back());   // trip → 搜尋頁
 await page.waitForTimeout(500);
@@ -1808,6 +1882,25 @@ const tUI2 = await page.evaluate(() => ({
 }));
 ok(tUI2.originVal.length > 0, '[TRIP-UI-5] ETA 頁「查去處」→ 該站帶入做起點', tUI2.originVal);
 ok(tUI2.destVal.length === 0, '[TRIP-UI-5] 終點留空待輸入（入口開新查詢）');
+
+// [TRIP-UI-7] focus 空輸入框 → 收藏車站下接選單（2026-10-13 用戶建議 UX）
+await page.evaluate(() => window.BusETA.store.favorites.toggle('kmb',
+	{ stop: 'VERIFYFAV1', name: '測試收藏站', lat: 22.3, lng: 114.2 }));
+await page.click('#trip-dest');
+await page.waitForSelector('#trip-dest-sug .sug-head', { timeout: 5000 });
+const favUI = await page.evaluate(() => ({
+	head: document.querySelector('#trip-dest-sug .sug-head')?.textContent || '',
+	item: document.querySelector('#trip-dest-sug .sug-item .sug-name')?.textContent.trim() || ''
+}));
+ok(favUI.head.includes('收藏車站') && favUI.item.includes('測試收藏站'),
+	'[TRIP-UI-7] focus 空欄 → 顯示收藏車站選單', `${favUI.head} / ${favUI.item}`);
+await page.click('#trip-dest-sug .sug-item');
+await page.waitForTimeout(300);
+const favPicked = await page.evaluate(() => document.getElementById('trip-dest').value);
+ok(favPicked === '測試收藏站', '[TRIP-UI-7] 揀收藏站 → 帶入終點欄', favPicked);
+// 測試收藏清走（還原狀態）
+await page.evaluate(() => window.BusETA.store.favorites.toggle('kmb',
+	{ stop: 'VERIFYFAV1', name: '測試收藏站', lat: 22.3, lng: 114.2 }));
 
 /* ---------- 9f. M11 一鍵定位（[GEO-*]，mock navigator.geolocation） ---------- */
 console.log('\n[9f] M11 定位');
