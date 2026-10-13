@@ -1206,6 +1206,7 @@
 		let capped = false;
 		if (maxTransfers >= 1 && oGroups.length + dGroups.length <= PLAN_CAP_STOPS) {
 			const t0 = performance.now();
+			const idxT = crossIndex(stores.ctb);   // 聯營線方向表（同走廊轉乘禁令用）
 			const dIdx2 = new Map();   // co|route|bound|svc → [{seq, gi, member, dest}]
 			dGroups.forEach((g, gi) => {
 				for (const m of g.members) {
@@ -1240,8 +1241,14 @@
 								const pStore = stores[p.co];
 								if (!pStore) continue;
 								for (const rb of getStopRoutes(pStore, p.stop)) {
-									// 同公司同路線同方向 = 根本唔使轉（直達已覆蓋）
-									if (p.co === m.co && rb.route === r.route && rb.bound === r.bound) continue;
+									// 同走廊唔可以轉乘（2026-10-13 用戶實測迴歸：103 搭 1 站走、
+									// 過對面轉 103 反方向搭 13 站返 —— 直接行過對面馬路搭就得，
+									// 呢類方案完全唔合理）：
+									//   · 同公司同路線（同方向直達已覆蓋；反方向即「搭走再搭返嚟」）
+									//   · 聯營線（cross.dirs 有收錄）跨公司同號 = 同一條實體走廊
+									// 撞號線（dirs 無收錄、唔同公司）係唔同服務，唔喺禁之列。
+									if (rb.route === r.route &&
+										(p.co === m.co || (idxT && idxT.dirs[r.route]))) continue;
 									const hits = dIdx2.get(`${p.co}|${rb.route}|${rb.bound}|${rb.svc}`);
 									if (!hits) continue;
 									for (const h of hits) {
