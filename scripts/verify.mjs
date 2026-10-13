@@ -1769,7 +1769,7 @@ const tripAlgo = await page.evaluate(() => {
 ok(tripAlgo.direct.length > 0 && tripAlgo.hasDirectRoute1, '[TRIP-1] 已知同線兩站搵到直達',
 	`route 1（${tripAlgo.ms1}ms）`);
 ok(tripAlgo.revHasDirect, '[TRIP-2] 反向查詢同樣搵到直達（方向對稱）');
-ok(tripAlgo.directDedup, '[TRIP-3] 直達方案按 route|bound 去重（同走廊一條）');
+ok(tripAlgo.directDedup, '[TRIP-3] 直達方案按 route|bound 走廊去重（一走廊一方案）');
 ok(tripAlgo.legValid, '[TRIP-4] 直達 leg：seq(上) < seq(落) 且站數 > 0（R-G）');
 ok(tripAlgo.pairFound, '[TRIP-5] 觀塘／筲箕灣站名命中（離線資料）');
 ok(tripAlgo.plans2 > 0 && tripAlgo.hasTransfer, '[TRIP-5] 觀塘→筲箕灣有方案（含 1 轉）',
@@ -1799,8 +1799,31 @@ ok(tripAlgo.collideFound && tripAlgo.collide.d40 === 0,
 ok(tripAlgo.collideFound && tripAlgo.collide.mixedCo === 0,
 	'[TRIP-13] 不變式：每條 leg 內 from/to 同公司（站序唔跨公司混搭）');
 
+// [TRIP-14] 即時班次過濾（純函數，離線可測；2026-10-13 用戶回饋：6P/6E 冇班次唔應出現喺建議）
+const t14 = await page.evaluate(() => {
+	const B = window.BusETA;
+	const plans = [
+		{ legs: [{ co: 'kmb', from: { stop: 'S1' }, route: '1', bound: 'O', svc: 1 }] },
+		{ legs: [{ co: 'kmb', from: { stop: 'S2' }, route: '2', bound: 'O', svc: 1 }] }
+	];
+	const avail = new Map([['kmb|S1|1|O', false]]);   // route 1 確認冇班次；route 2 查唔到（missing → fail-open）
+	const r = B.applyTripEtaFilter(plans, avail);
+	return { key: B.tripEtaKey(plans[0].legs[0]), kept: r.plans.length, filtered: r.filtered };
+});
+ok(t14.key === 'kmb|S1|1|O', '[TRIP-14] tripEtaKey 格式（co|stop|route|bound，走廊級唔含 svc）', t14.key);
+ok(t14.kept === 1 && t14.filtered === 1,
+	'[TRIP-14] 班次過濾：確認冇班次 (false) 剔除；查唔到 (missing/null) fail-open 保留',
+	`kept=${t14.kept} filtered=${t14.filtered}`);
+
 /* ---------- 9e. M12 trip 頁 UI（[TRIP-UI-*]） ---------- */
 console.log('\n[9e] M12 trip 頁 UI');
+// [UI-QA-1] 首頁兩個入口掣同一列（2026-10-13 用戶回饋：原本上下疊太佔位）
+const qaRow = await page.evaluate(() => {
+	const a = document.getElementById('locate-btn').getBoundingClientRect();
+	const b = document.getElementById('trip-entry').getBoundingClientRect();
+	return { sameRow: Math.abs(a.top - b.top) < 2, narrow: a.width < 300, w: Math.round(a.width) };
+});
+ok(qaRow.sameRow && qaRow.narrow, '[UI-QA-1] 首頁「用我位置」＋「查點到點」兩掣同一列平分寬度', `寬 ${qaRow.w}px`);
 await page.click('#trip-entry');
 await page.waitForFunction(() => document.getElementById('page-trip')?.classList.contains('active'), { timeout: 5000 });
 const tUI0 = await page.evaluate(() => ({
@@ -1832,6 +1855,57 @@ ok(tUI1.plans > 0, '[TRIP-UI-2] 兩點 resolve 後自動出方案卡', `${tUI1.p
 ok(tUI1.noMinutes, '[TRIP-UI-3] 方案卡唔顯示預估時間（決策乙）');
 ok(tUI1.walkTags > 0, '[TRIP-UI-3] 顯示步行約 X 米（×1.3 估算）');
 await page.screenshot({ path: join(SHOTS, '15-trip-plans.png') });
+
+// [TRIP-UI-8] 對調掣：起終點互換並自動重跑規劃（2026-10-13 用戶建議）
+const beforeSwap = await page.evaluate(() => ({
+	o: document.getElementById('trip-origin').value,
+	d: document.getElementById('trip-dest').value,
+	plans: document.querySelectorAll('#trip-results .plan').length
+}));
+await page.click('#trip-swap');
+// v1.4.4：renderTrip 係 async（連網檢查即時班次）——等「檢查中」狀態消失，唔可以用死 timeout
+await page.waitForFunction(() => !document.getElementById('trip-status').textContent.includes('檢查即時班次中'), { timeout: 20000 });
+const afterSwap = await page.evaluate(() => ({
+	o: document.getElementById('trip-origin').value,
+	d: document.getElementById('trip-dest').value,
+	plans: document.querySelectorAll('#trip-results .plan').length
+}));
+ok(afterSwap.o === beforeSwap.d && afterSwap.d === beforeSwap.o,
+	'[TRIP-UI-8] 對調掣：起終點互換', `${beforeSwap.o}→${beforeSwap.d} ⇒ ${afterSwap.o}→${afterSwap.d}`);
+ok(afterSwap.plans > 0, '[TRIP-UI-8] 對調後自動重跑方案');
+await page.click('#trip-swap');   // 對調返原狀，唔影響後續測試
+await page.waitForFunction(() => !document.getElementById('trip-status').textContent.includes('檢查即時班次中'), { timeout: 20000 });
+
+// [TRIP-UI-9] 連網班次檢查（2026-10-13 用戶回饋：6P/6E 冇班次唔應出現喺建議）：
+// ⚠️ 唔可以用 ctx.route mock ETA 端點 —— ETA 請求經 sw.js fetch handler 發出，
+// route 攔唔到。改為 stub window.BusETA.checkTripEtas 回「全部 false」
+//（API 對冇班次線回 eta:null 嘅形狀已用 curl 實證，純邏輯由 [TRIP-14] 覆蓋）。
+await page.evaluate(() => {
+	window.__origCheckTripEtas = window.BusETA.checkTripEtas;
+	// ⚠️ 要有 forEach（批次合併會呼叫）——上次漏咗令 renderTrip 卡死「檢查中」
+	window.BusETA.checkTripEtas = async () => ({ get: () => false, forEach: () => {} });
+});
+await page.click('#trip-swap');
+await page.waitForFunction(() => !document.getElementById('trip-status').textContent.includes('檢查即時班次中'), { timeout: 15000 });
+const tUI9 = await page.evaluate(() => ({
+	plans: document.querySelectorAll('#trip-results .plan').length,
+	empty: document.querySelector('#trip-results .empty')?.textContent.replace(/\s+/g, ' ').trim() || '',
+	st: document.getElementById('trip-status').textContent
+}));
+ok(tUI9.plans === 0, '[TRIP-UI-9] 全部 leg 確認冇班次（eta:null）→ 方案全數篩走', `${tUI9.plans} 個方案`);
+ok(/冇班次/.test(tUI9.empty), '[TRIP-UI-9] 顯示「冇班次」解釋', tUI9.empty.slice(0, 40));
+await page.evaluate(() => {
+	window.BusETA.checkTripEtas = window.__origCheckTripEtas;
+});
+await page.click('#trip-swap');   // 對調返原狀＋真實檢查（fail-open）重跑
+await page.waitForFunction(() => !document.getElementById('trip-status').textContent.includes('檢查即時班次中'), { timeout: 20000 });
+const tUI9b = await page.evaluate(() => ({
+	plans: document.querySelectorAll('#trip-results .plan').length,
+	o: document.getElementById('trip-origin').value,
+	d: document.getElementById('trip-dest').value
+}));
+ok(tUI9b.plans > 0, '[TRIP-UI-9] 恢復／檢查失敗 → fail-open 照常顯示方案', `${tUI9b.plans} 個方案`);
+ok(tUI9b.o === beforeSwap.o && tUI9b.d === beforeSwap.d, '[TRIP-UI-9] 對調兩次返原狀（唔影響後續測試）');
 
 // History 返回重繪（M10 慣例）：back → 搜尋頁，forward → trip 且方案重繪
 const hLenTrip = await page.evaluate(() => history.length);
