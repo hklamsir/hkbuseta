@@ -1629,6 +1629,469 @@ ok(afterBtnBack.len === beforeBtnBack,
 	'返回鈕用 history.back()（stack 深度不變 = 冇另 push 一層）',
 	`${beforeBtnBack} → ${afterBtnBack.len}`);
 
+/* ---------- 9d. M12 planTrip 演算法（[TRIP-*]） ---------- */
+console.log('\n[9d] M12 planTrip 演算法');
+// ⚠️ 斷言用結構性性質（由離線站序構造測試點），唔綁會漂移的官方座標
+const tripAlgo = await page.evaluate(() => {
+	const B = window.BusETA, DBS = window.__DBS;
+	const kmb = DBS.kmb;
+	const out = {};
+
+	// [TRIP-1/2/3] 直達：由路線 1（KMB O svc1）站序構造起終點
+	let ri = -1;
+	for (let i = 0; i < kmb.routeList.length; i++) {
+		const [no, b, svc] = kmb.routeList[i];
+		if (no === '1' && b === 'O' && svc === 1) { ri = i; break; }
+	}
+	const seq1 = kmb.routeSeqs[ri].slice().sort((a, b) => a.seq - b.seq);
+	const sA = kmb.stopById.get(seq1[0].stop);
+	const sB = kmb.stopById.get(seq1[Math.min(6, seq1.length - 1)].stop);
+	const t0 = performance.now();
+	const r1 = B.planTrip(DBS, { lat: sA.lat, lng: sA.lng }, { lat: sB.lat, lng: sB.lng }, {});
+	out.ms1 = Math.round(performance.now() - t0);
+	out.direct = r1.plans.filter((p) => p.transfers === 0);
+	out.hasDirectRoute1 = out.direct.some((p) => p.legs[0].route === '1');
+	out.revHasDirect = B.planTrip(DBS, { lat: sB.lat, lng: sB.lng }, { lat: sA.lat, lng: sA.lng }, {})
+		.plans.some((p) => p.transfers === 0 && p.legs[0].route === '1');
+	const dKeys = out.direct.map((p) => `${p.legs[0].route}|${p.legs[0].bound}`);
+	out.directDedup = dKeys.length === new Set(dKeys).size;
+	out.legValid = out.direct.every((p) => p.legs.every((l) => l.stops > 0 && l.from.seq < l.to.seq));
+
+	// [TRIP-11] 上車站最近優先（2026-10-13 用戶回饋迴歸）：
+	// 起點 = 路線 1 站序首站座標（步行 0）→ route 1 直達方案必須由該站上車，
+	// 唔可以因「站數最少」反而揀遠處嘅同線站（實測 290A 中伏案例）
+	{
+		const r11 = B.planTrip(DBS, { lat: sA.lat, lng: sA.lng }, { lat: sB.lat, lng: sB.lng }, {});
+		const d11 = r11.plans.find((p) => p.transfers === 0 && p.legs[0].route === '1');
+		out.nearestBoard = d11 ? { stop: d11.legs[0].from.stop, walk: d11.walkOriginM } : null;
+		out.nearestExpect = sA.stop;
+	}
+
+	// [TRIP-5/6/7] 觀塘 → 筲箕灣（計劃書 §6 指定一轉案例）
+	const findStop = (kw) => {
+		for (const s of kmb.stopById.values()) if (s.name.includes(kw)) return s;
+		return null;
+	};
+	const kt = findStop('觀塘站') || findStop('觀塘');
+	const skw = findStop('筲箕灣');
+	out.pairFound = !!(kt && skw);
+	if (out.pairFound) {
+		const t1 = performance.now();
+		const r2 = B.planTrip(DBS, { lat: kt.lat, lng: kt.lng }, { lat: skw.lat, lng: skw.lng }, {});
+		out.ms2 = Math.round(performance.now() - t1);
+		out.plans2 = r2.plans.length;
+		out.hasTransfer = r2.plans.some((p) => p.transfers === 1);
+		out.allValid = r2.plans.every((p) => p.legs.length === p.transfers + 1 &&
+			p.legs.every((l) => l.stops > 0 && l.from.stop && l.to.stop));
+		out.hasCtbLeg = r2.plans.some((p) => p.legs.some((l) => l.co === 'ctb'));
+	}
+
+	// [TRIP-12] 落車站名實相符優先（2026-10-13 用戶回饋）：
+	// dest「高鐵西九龍站」— OSM 命中點（匯民道）到「佐敦炮台街」直線 234 米，
+	// 近過「佐敦道,高鐵站」331 米，但站名有「高鐵」嘅候選應優先（大型街區直線失真）。
+	// 由 95 號沿線（順利邨公園上車）構造：期望落車 = 佐敦道,高鐵站，唔係炮台街。
+	{
+		const slp = findStop('順利邨公園');
+		const r12 = B.planTrip(DBS,
+			{ lat: slp.lat, lng: slp.lng, name: slp.name },
+			{ lat: 22.30407, lng: 114.16651, name: '高鐵西九龍站' }, {});
+		const d12 = r12.plans.find((p) => p.transfers === 0 && p.legs[0].route === '95');
+		out.affinity = d12 ? d12.legs[0].to.name : null;
+	}
+
+	// [TRIP-13] 跨公司撞號線唔可以混站序直達（2026-10-13 用戶回饋）：
+	// 九巴 40（荃灣↔麗港城）/ 40P（荃灣↔觀塘碼頭）唔過海唔經羅便臣道；
+	// 城巴 40（華富↔會展）/ 40P（深灣↔羅便臣道）純港島不停九龍灣站。
+	// route|bound 撞號 → 直接搜尋必須同公司站序，否則九巴 seq 配城巴 seq 假命中。
+	{
+		const klw = (() => { for (const s of kmb.stopById.values()) if (String(s.name).includes('九龍灣站')) return s; return null; })();
+		let gtw = null;
+		for (const s of DBS.ctb.stopById.values()) if (String(s.name).includes('花園台')) { gtw = s; break; }
+		out.collideFound = !!(klw && gtw);
+		if (out.collideFound) {
+			const r13 = B.planTrip(DBS,
+				{ lat: klw.lat, lng: klw.lng, name: klw.name },
+				{ lat: gtw.lat, lng: gtw.lng, name: gtw.name }, {});
+			out.collide = {
+				d40: r13.plans.filter((p) => p.transfers === 0 &&
+					(p.legs[0].route === '40' || p.legs[0].route === '40P')).length,
+				// 正確性不變式：每條 leg 內 from/to 必須同公司（一趟實體巴士單一公司站序）
+				mixedCo: r13.plans.filter((p) => p.legs.some((l) => l.from.co !== l.to.co)).length
+			};
+		}
+	}
+
+	// [TRIP-8] 多 svc：路線 40 KMB 有多個 svc 且站序唔同 —— svc≠1 變體唔可以漏判
+	const svcs40 = kmb.routeList
+		.map((r, i) => [r, i])
+		.filter(([r]) => r[0] === '40' && r[1] === 'O');
+	out.svc40Count = svcs40.length;
+	out.svc40Found = false;
+	for (const [, i] of svcs40) {
+		if (kmb.routeList[i][2] === 1) continue;
+		const sq = kmb.routeSeqs[i].slice().sort((a, b) => a.seq - b.seq);
+		if (sq.length < 8) continue;
+		const a = kmb.stopById.get(sq[0].stop);
+		const b2 = kmb.stopById.get(sq[6].stop);
+		if (!a || !b2) continue;
+		if (B.planTrip(DBS, { lat: a.lat, lng: a.lng }, { lat: b2.lat, lng: b2.lng }, {})
+			.plans.some((p) => p.legs.some((l) => l.route === '40'))) {
+			out.svc40Found = true;
+			break;
+		}
+	}
+
+	// [TRIP-9] 無站：海中心一點（由當前離線資料沿維港範圍取樣，揀離任何站最遠嗰點
+	// —— 唔綁死座標：官方站點每日更新，硬編海中心座標會飄（2026-10-12 實測踩坑））
+	const water = (() => {
+		const stops = [...kmb.stopById.values(), ...DBS.ctb.stopById.values()];
+		let best = null, bestD = -1;
+		for (let lat = 22.285; lat <= 22.315; lat += 0.005) {
+			for (let lng = 114.14; lng <= 114.20; lng += 0.005) {
+				let dmin = Infinity;
+				for (const s of stops) {
+					const d = B.haversine(lat, lng, s.lat, s.lng);
+					if (d < dmin) { dmin = d; if (dmin <= bestD) break; }
+				}
+				if (dmin > bestD) { bestD = dmin; best = { lat, lng }; }
+			}
+		}
+		return { point: best, nearest: Math.round(bestD) };
+	})();
+	const r3 = B.planTrip(DBS, water.point, water.point, {});
+	out.harbour = { reason: r3.reason, n: r3.plans.length, nearest: water.nearest };
+	// 附帶驗證 walkRadius 參數生效：半徑 1 米時連黃大仙中心都會 noStops
+	const r4 = B.planTrip(DBS, { lat: 22.3414, lng: 114.1943 }, { lat: 22.3414, lng: 114.1943 }, { walkRadius: 1 });
+	out.tinyRadius = { reason: r4.reason, n: r4.plans.length };
+
+	return out;
+});
+ok(tripAlgo.direct.length > 0 && tripAlgo.hasDirectRoute1, '[TRIP-1] 已知同線兩站搵到直達',
+	`route 1（${tripAlgo.ms1}ms）`);
+ok(tripAlgo.revHasDirect, '[TRIP-2] 反向查詢同樣搵到直達（方向對稱）');
+ok(tripAlgo.directDedup, '[TRIP-3] 直達方案按 route|bound 走廊去重（一走廊一方案）');
+ok(tripAlgo.legValid, '[TRIP-4] 直達 leg：seq(上) < seq(落) 且站數 > 0（R-G）');
+ok(tripAlgo.pairFound, '[TRIP-5] 觀塘／筲箕灣站名命中（離線資料）');
+ok(tripAlgo.plans2 > 0 && tripAlgo.hasTransfer, '[TRIP-5] 觀塘→筲箕灣有方案（含 1 轉）',
+	`${tripAlgo.plans2} 個方案（${tripAlgo.ms2}ms）`);
+ok(tripAlgo.allValid, '[TRIP-6] 全部方案：leg 數 = 轉數 + 1 且站數 > 0');
+ok(tripAlgo.hasCtbLeg, '[TRIP-7] 方案含城巴段（跨公司資料參與規劃）');
+ok(tripAlgo.svc40Count > 1 && tripAlgo.svc40Found,
+	'[TRIP-8] 多 svc 路線 40 唔漏判（svc≠1 變體都搵到，R-E）',
+	`40 號 O 方向有 ${tripAlgo.svc40Count} 個 svc`);
+ok(tripAlgo.harbour.reason === 'noStops' && tripAlgo.harbour.n === 0 && tripAlgo.harbour.nearest > 500,
+	'[TRIP-9] 海中心（離站最遠取樣點）→ noStops 空結果',
+	`最近站 ${tripAlgo.harbour.nearest} 米`);
+ok(tripAlgo.tinyRadius.reason === 'noStops' && tripAlgo.tinyRadius.n === 0,
+	'[TRIP-9] walkRadius 參數生效（半徑 1 米 → noStops）');
+ok(tripAlgo.ms2 <= 2000, '[TRIP-10] 效能：觀塘→筲箕灣規劃 ≤ 2 秒', `${tripAlgo.ms2}ms`);
+ok(!!tripAlgo.nearestBoard &&
+	tripAlgo.nearestBoard.stop === tripAlgo.nearestExpect &&
+	tripAlgo.nearestBoard.walk <= 30,
+	'[TRIP-11] 上車站最近優先：起點旁的站被選中（步行約 0 米）',
+	JSON.stringify(tripAlgo.nearestBoard));
+ok(!!tripAlgo.affinity && tripAlgo.affinity.includes('高鐵') && !tripAlgo.affinity.includes('炮台街'),
+	'[TRIP-12] 落車站名實相符優先：高鐵西九龍站 → 佐敦道,高鐵站（非較近嘅炮台街）',
+	tripAlgo.affinity || '(無 route 95 直達)');
+ok(tripAlgo.collideFound && tripAlgo.collide.d40 === 0,
+	'[TRIP-13] 撞號線：九龍灣站 → 花園台 無 40/40P 直達假命中',
+	JSON.stringify(tripAlgo.collide));
+ok(tripAlgo.collideFound && tripAlgo.collide.mixedCo === 0,
+	'[TRIP-13] 不變式：每條 leg 內 from/to 同公司（站序唔跨公司混搭）');
+
+// [TRIP-14] 即時班次過濾（純函數，離線可測；2026-10-13 用戶回饋：6P/6E 冇班次唔應出現喺建議）
+const t14 = await page.evaluate(() => {
+	const B = window.BusETA;
+	const plans = [
+		{ legs: [{ co: 'kmb', from: { stop: 'S1' }, route: '1', bound: 'O', svc: 1 }] },
+		{ legs: [{ co: 'kmb', from: { stop: 'S2' }, route: '2', bound: 'O', svc: 1 }] }
+	];
+	const avail = new Map([['kmb|S1|1|O', false]]);   // route 1 確認冇班次；route 2 查唔到（missing → fail-open）
+	const r = B.applyTripEtaFilter(plans, avail);
+	return { key: B.tripEtaKey(plans[0].legs[0]), kept: r.plans.length, filtered: r.filtered };
+});
+ok(t14.key === 'kmb|S1|1|O', '[TRIP-14] tripEtaKey 格式（co|stop|route|bound，走廊級唔含 svc）', t14.key);
+ok(t14.kept === 1 && t14.filtered === 1,
+	'[TRIP-14] 班次過濾：確認冇班次 (false) 剔除；查唔到 (missing/null) fail-open 保留',
+	`kept=${t14.kept} filtered=${t14.filtered}`);
+
+// [TRIP-15] 同走廊轉乘禁令（2026-10-13 用戶實測迴歸：103 搭 1 站走、過對面轉
+// 103 反方向搭 13 站返 —— 直接行過對面搭就得）。結構性不變式：任何轉車方案
+// 兩段唔可以同走廊（同公司同路線，或聯營線跨公司同號）。
+const t15 = await page.evaluate(() => {
+	const B = window.BusETA;
+	const DBS = window.__DBS;
+	const o = DBS.kmb.stopById.get('18492910339410B1');
+	let d = null;
+	for (const [, s] of DBS.kmb.stopById) { if (String(s.name).includes('筲箕灣')) { d = s; break; } }
+	const res = B.planTrip(DBS, { lat: o.lat, lng: o.lng, name: o.name }, { lat: d.lat, lng: d.lng, name: d.name }, { maxTransfers: 1 });
+	const idx = B.crossIndex(DBS.ctb);
+	const bad = res.plans.filter((p) => p.transfers === 1 &&
+		p.legs[0].route === p.legs[1].route &&
+		(p.legs[0].co === p.legs[1].co || !!idx.dirs[p.legs[0].route]));
+	return { total: res.plans.length, bad: bad.length };
+});
+ok(t15.total > 0 && t15.bad === 0,
+	'[TRIP-15] 轉車方案無同走廊轉乘（同路線反方向「搭走再搭返嚟」已被禁）',
+	`plans=${t15.total} bad=${t15.bad}`);
+
+/* ---------- 9e. M12 trip 頁 UI（[TRIP-UI-*]） ---------- */
+console.log('\n[9e] M12 trip 頁 UI');
+// [UI-QA-1] 首頁兩個入口掣同一列（2026-10-13 用戶回饋：原本上下疊太佔位）
+const qaRow = await page.evaluate(() => {
+	const a = document.getElementById('locate-btn').getBoundingClientRect();
+	const b = document.getElementById('trip-entry').getBoundingClientRect();
+	return { sameRow: Math.abs(a.top - b.top) < 2, narrow: a.width < 300, w: Math.round(a.width) };
+});
+ok(qaRow.sameRow && qaRow.narrow, '[UI-QA-1] 首頁「用我位置」＋「查點到點」兩掣同一列平分寬度', `寬 ${qaRow.w}px`);
+await page.click('#trip-entry');
+await page.waitForFunction(() => document.getElementById('page-trip')?.classList.contains('active'), { timeout: 5000 });
+const tUI0 = await page.evaluate(() => ({
+	disclaimer: document.querySelector('.trip-disclaimer')?.textContent || '',
+	hint: document.getElementById('trip-status').textContent
+}));
+ok(/靜態資料估算/.test(tUI0.disclaimer), '[TRIP-UI-1] 頁底免責聲明存在（直線×1.3）');
+ok(tUI0.hint.length > 0, '[TRIP-UI-1] 未輸入時顯示指引');
+
+// 起點：觀塘（經 Nominatim 建議清單；節流層與搜尋頁共用）
+await page.click('#trip-origin');
+await page.type('#trip-origin', '觀塘', { delay: 30 });
+await page.waitForSelector('#trip-origin-sug .sug-item', { timeout: 25000 });
+await page.click('#trip-origin-sug .sug-item');
+await page.waitForTimeout(200);
+// 終點：筲箕灣
+await page.click('#trip-dest');
+await page.type('#trip-dest', '筲箕灣', { delay: 30 });
+await page.waitForSelector('#trip-dest-sug .sug-item', { timeout: 25000 });
+await page.click('#trip-dest-sug .sug-item');
+await page.waitForSelector('#trip-results .plan', { timeout: 15000 });
+const tUI1 = await page.evaluate(() => ({
+	plans: document.querySelectorAll('#trip-results .plan').length,
+	xfer: [...document.querySelectorAll('#trip-results .xfer')].map((x) => x.textContent.trim()),
+	noMinutes: !document.getElementById('trip-results').textContent.includes('分鐘'),
+	walkTags: [...document.querySelectorAll('#trip-results .walk')].length
+}));
+ok(tUI1.plans > 0, '[TRIP-UI-2] 兩點 resolve 後自動出方案卡', `${tUI1.plans} 個方案`);
+ok(tUI1.noMinutes, '[TRIP-UI-3] 方案卡唔顯示預估時間（決策乙）');
+ok(tUI1.walkTags > 0, '[TRIP-UI-3] 顯示步行約 X 米（×1.3 估算）');
+await page.screenshot({ path: join(SHOTS, '15-trip-plans.png') });
+
+// [TRIP-UI-8] 對調掣：起終點互換並自動重跑規劃（2026-10-13 用戶建議）
+const beforeSwap = await page.evaluate(() => ({
+	o: document.getElementById('trip-origin').value,
+	d: document.getElementById('trip-dest').value,
+	plans: document.querySelectorAll('#trip-results .plan').length
+}));
+await page.click('#trip-swap');
+// v1.4.4：renderTrip 係 async（連網檢查即時班次）——等「檢查中」狀態消失，唔可以用死 timeout
+await page.waitForFunction(() => !document.getElementById('trip-status').textContent.includes('檢查即時班次中'), { timeout: 20000 });
+const afterSwap = await page.evaluate(() => ({
+	o: document.getElementById('trip-origin').value,
+	d: document.getElementById('trip-dest').value,
+	plans: document.querySelectorAll('#trip-results .plan').length
+}));
+ok(afterSwap.o === beforeSwap.d && afterSwap.d === beforeSwap.o,
+	'[TRIP-UI-8] 對調掣：起終點互換', `${beforeSwap.o}→${beforeSwap.d} ⇒ ${afterSwap.o}→${afterSwap.d}`);
+ok(afterSwap.plans > 0, '[TRIP-UI-8] 對調後自動重跑方案');
+await page.click('#trip-swap');   // 對調返原狀，唔影響後續測試
+await page.waitForFunction(() => !document.getElementById('trip-status').textContent.includes('檢查即時班次中'), { timeout: 20000 });
+
+// [TRIP-UI-9] 連網班次檢查（2026-10-13 用戶回饋：6P/6E 冇班次唔應出現喺建議）：
+// ⚠️ 唔可以用 ctx.route mock ETA 端點 —— ETA 請求經 sw.js fetch handler 發出，
+// route 攔唔到。改為 stub window.BusETA.checkTripEtas 回「全部 false」
+//（API 對冇班次線回 eta:null 嘅形狀已用 curl 實證，純邏輯由 [TRIP-14] 覆蓋）。
+await page.evaluate(() => {
+	window.__origCheckTripEtas = window.BusETA.checkTripEtas;
+	// ⚠️ 要有 forEach（批次合併會呼叫）——上次漏咗令 renderTrip 卡死「檢查中」
+	window.BusETA.checkTripEtas = async () => ({ get: () => false, forEach: () => {} });
+});
+await page.click('#trip-swap');
+await page.waitForFunction(() => !document.getElementById('trip-status').textContent.includes('檢查即時班次中'), { timeout: 15000 });
+const tUI9 = await page.evaluate(() => ({
+	plans: document.querySelectorAll('#trip-results .plan').length,
+	empty: document.querySelector('#trip-results .empty')?.textContent.replace(/\s+/g, ' ').trim() || '',
+	st: document.getElementById('trip-status').textContent
+}));
+ok(tUI9.plans === 0, '[TRIP-UI-9] 全部 leg 確認冇班次（eta:null）→ 方案全數篩走', `${tUI9.plans} 個方案`);
+ok(/冇班次/.test(tUI9.empty), '[TRIP-UI-9] 顯示「冇班次」解釋', tUI9.empty.slice(0, 40));
+await page.evaluate(() => {
+	window.BusETA.checkTripEtas = window.__origCheckTripEtas;
+});
+await page.click('#trip-swap');   // 對調返原狀＋真實檢查（fail-open）重跑
+await page.waitForFunction(() => !document.getElementById('trip-status').textContent.includes('檢查即時班次中'), { timeout: 20000 });
+const tUI9b = await page.evaluate(() => ({
+	plans: document.querySelectorAll('#trip-results .plan').length,
+	o: document.getElementById('trip-origin').value,
+	d: document.getElementById('trip-dest').value
+}));
+ok(tUI9b.plans > 0, '[TRIP-UI-9] 恢復／檢查失敗 → fail-open 照常顯示方案', `${tUI9b.plans} 個方案`);
+ok(tUI9b.o === beforeSwap.o && tUI9b.d === beforeSwap.d, '[TRIP-UI-9] 對調兩次返原狀（唔影響後續測試）');
+
+// History 返回重繪（M10 慣例）：back → 搜尋頁，forward → trip 且方案重繪
+const hLenTrip = await page.evaluate(() => history.length);
+await page.evaluate(() => history.back());
+await page.waitForTimeout(700);
+const tripBackSearch = await page.evaluate(() => document.getElementById('page-search')?.classList.contains('active'));
+await page.evaluate(() => history.forward());
+await page.waitForTimeout(700);
+const tripFwd = await page.evaluate(() => ({
+	trip: document.getElementById('page-trip')?.classList.contains('active'),
+	plans: document.querySelectorAll('#trip-results .plan').length,
+	len: history.length
+}));
+ok(tripBackSearch, '[TRIP-UI-4] trip → 系統返回 → 搜尋頁');
+ok(tripFwd.trip && tripFwd.plans > 0, '[TRIP-UI-4] 前進回 trip 頁方案重繪（restorePage）', `${tripFwd.plans} 個方案`);
+ok(tripFwd.len === hLenTrip, '[TRIP-UI-4] 來回返回冇令 stack 變深', `${hLenTrip} → ${tripFwd.len}`);
+
+// [TRIP-UI-6] 撳上車站 → 跳「路線詳情」並高亮該站（2026-10-13 用戶回饋：
+// 原本跳 ETA 頁，用戶要睇條線行邊；改跳路線詳情 + .seq-row.sel 高亮）
+const upLabel = await page.evaluate(() => document.querySelector('#trip-results .leg .pt.up')?.textContent.trim());
+await page.click('#trip-results .leg .pt.up');
+await page.waitForFunction(() => document.getElementById('page-route')?.classList.contains('active'), { timeout: 10000 });
+await page.waitForFunction(() => document.querySelector('#rt-list .seq-row.sel'), { timeout: 10000 });
+const rtSel = await page.evaluate(() => ({
+	no: document.getElementById('rt-no').textContent,
+	sel: document.querySelector('#rt-list .seq-row.sel .nm .t')?.textContent.trim()
+}));
+ok(rtSel.sel === upLabel, '[TRIP-UI-6] 撳上車站 → 路線詳情頁並高亮該站',
+	`${rtSel.no} @ ${rtSel.sel}（期望 ${upLabel}）`);
+await page.screenshot({ path: join(SHOTS, '16-trip-leg-route.png') });
+await page.evaluate(() => history.back());   // 路線頁 → trip
+await page.waitForTimeout(600);
+
+// 站點跳轉：ETA 頁「查去處」→ 該站帶入做起點
+await page.evaluate(() => history.back());   // trip → 搜尋頁
+await page.waitForTimeout(500);
+await page.click('#recent [data-r="0"]');
+await page.waitForFunction(() => document.getElementById('page-nearby')?.classList.contains('active'), { timeout: 15000 });
+await page.waitForTimeout(400);
+await page.click('#nb-list .stop');
+await page.waitForFunction(() => document.getElementById('page-eta')?.classList.contains('active'), { timeout: 15000 });
+await page.click('#eta-trip');
+await page.waitForFunction(() => document.getElementById('page-trip')?.classList.contains('active'), { timeout: 5000 });
+await page.waitForTimeout(300);
+const tUI2 = await page.evaluate(() => ({
+	originVal: document.getElementById('trip-origin').value,
+	destVal: document.getElementById('trip-dest').value
+}));
+ok(tUI2.originVal.length > 0, '[TRIP-UI-5] ETA 頁「查去處」→ 該站帶入做起點', tUI2.originVal);
+ok(tUI2.destVal.length === 0, '[TRIP-UI-5] 終點留空待輸入（入口開新查詢）');
+
+// [TRIP-UI-7] focus 空輸入框 → 收藏車站下接選單（2026-10-13 用戶建議 UX）
+await page.evaluate(() => window.BusETA.store.favorites.toggle('kmb',
+	{ stop: 'VERIFYFAV1', name: '測試收藏站', lat: 22.3, lng: 114.2 }));
+await page.click('#trip-dest');
+await page.waitForSelector('#trip-dest-sug .sug-head', { timeout: 5000 });
+const favUI = await page.evaluate(() => ({
+	head: document.querySelector('#trip-dest-sug .sug-head')?.textContent || '',
+	item: document.querySelector('#trip-dest-sug .sug-item .sug-name')?.textContent.trim() || ''
+}));
+ok(favUI.head.includes('收藏車站') && favUI.item.includes('測試收藏站'),
+	'[TRIP-UI-7] focus 空欄 → 顯示收藏車站選單', `${favUI.head} / ${favUI.item}`);
+await page.click('#trip-dest-sug .sug-item');
+await page.waitForTimeout(300);
+const favPicked = await page.evaluate(() => document.getElementById('trip-dest').value);
+ok(favPicked === '測試收藏站', '[TRIP-UI-7] 揀收藏站 → 帶入終點欄', favPicked);
+// 測試收藏清走（還原狀態）
+await page.evaluate(() => window.BusETA.store.favorites.toggle('kmb',
+	{ stop: 'VERIFYFAV1', name: '測試收藏站', lat: 22.3, lng: 114.2 }));
+
+/* ---------- 9f. M11 一鍵定位（[GEO-*]，mock navigator.geolocation） ---------- */
+console.log('\n[9f] M11 定位');
+// 先 reload 返搜尋頁（上一段結束時喺 trip 頁；reload 後 history 對齊搜尋頁）
+await page.reload({ waitUntil: 'networkidle' });
+await page.waitForFunction(() => document.getElementById('data-stamp')?.textContent?.includes('車站'), { timeout: 25000 });
+
+const geoBtns = await page.evaluate(() => ({
+	locate: !!document.getElementById('locate-btn'),
+	tripEntry: !!document.getElementById('trip-entry'),
+	relocate: !!document.getElementById('nb-relocate'),
+	tripGps: !!document.getElementById('trip-gps')
+}));
+ok(geoBtns.locate && geoBtns.tripEntry, '[GEO-0] 搜尋頁有定位／點到點兩個入口掣');
+ok(geoBtns.relocate && geoBtns.tripGps, '[GEO-0] nearby 重新定位掣與 trip 起點 GPS 掣存在');
+
+const mockGeoDenied = (code) => page.evaluate((c) => {
+	Object.defineProperty(navigator, 'geolocation', {
+		configurable: true,
+		value: { getCurrentPosition: (s, e) => setTimeout(() => e({ code: c, message: 'mock' }), 10) }
+	});
+}, code);
+
+// [GEO-1] PERMISSION_DENIED
+await mockGeoDenied(1);
+await page.click('#locate-btn');
+await page.waitForTimeout(400);
+const g1 = await page.evaluate(() => ({
+	toast: document.getElementById('toast').textContent,
+	onSearch: document.getElementById('page-search').classList.contains('active')
+}));
+ok(g1.toast.includes('未能取得定位') && g1.onSearch, '[GEO-1] 拒絕授權 → 教育提示，唔跳頁', g1.toast);
+
+// [GEO-2] POSITION_UNAVAILABLE
+await mockGeoDenied(2);
+await page.click('#locate-btn');
+await page.waitForTimeout(400);
+const g2 = await page.evaluate(() => document.getElementById('toast').textContent);
+ok(g2.includes('定位暫時唔到'), '[GEO-2] 訊號唔到 → 提示稍後再試或手動搜尋', g2);
+
+// [GEO-3] TIMEOUT
+await mockGeoDenied(3);
+await page.click('#locate-btn');
+await page.waitForTimeout(400);
+const g3 = await page.evaluate(() => document.getElementById('toast').textContent);
+ok(g3.includes('定位逾時'), '[GEO-3] 逾時 → 可重試提示', g3);
+
+// [GEO-4/5] 成功 → nearby 顯示「目前位置 ±acc 米」、半徑 200
+await page.evaluate(() => {
+	Object.defineProperty(navigator, 'geolocation', {
+		configurable: true,
+		value: {
+			getCurrentPosition: (s) => setTimeout(() => s({
+				coords: { latitude: 22.3414, longitude: 114.1943, accuracy: 35 }
+			}), 10)
+		}
+	});
+});
+await page.click('#locate-btn');
+await page.waitForFunction(() => document.getElementById('page-nearby')?.classList.contains('active'), { timeout: 10000 });
+await page.waitForTimeout(500);
+const g4 = await page.evaluate(() => ({
+	place: document.getElementById('nb-place').textContent,
+	r200: document.querySelector('#range-seg button[data-r="200"]')?.classList.contains('on'),
+	relocate: !!document.getElementById('nb-relocate'),
+	stops: document.querySelectorAll('#nb-list .stop').length
+}));
+ok(g4.place.includes('目前位置') && g4.place.includes('±35 米'), '[GEO-4] 成功 → nearby 顯示「目前位置 ±35 米」', g4.place);
+ok(g4.r200, '[GEO-5] 定位入口半徑 = 200 米（range 選鈕同步）');
+ok(g4.relocate, '[GEO-5] nearby 頁有「重新定位」掣');
+ok(g4.stops > 0, '[GEO-5] GPS 座標已當 place 使用（附近站有結果）', `${g4.stops} 組`);
+
+// [GEO-6] 重新定位（原地重跑，不跳頁）
+await page.click('#nb-relocate');
+await page.waitForTimeout(500);
+const g6 = await page.evaluate(() => ({
+	place: document.getElementById('nb-place').textContent,
+	nearby: document.getElementById('page-nearby').classList.contains('active')
+}));
+ok(g6.nearby && g6.place.includes('目前位置'), '[GEO-6] 重新定位後停留 nearby 且地點更新', g6.place);
+await page.screenshot({ path: join(SHOTS, '14-locate-nearby.png') });
+
+// [GEO-7] 唔支援 geolocation（舊瀏覽器）→ 定位掣隱藏
+// 用 addInitScript 喺任何 app script 之前剷走 Navigator.prototype.geolocation
+await ctx.addInitScript(() => { try { delete Navigator.prototype.geolocation; } catch (e) { /* ignore */ } });
+await page.reload({ waitUntil: 'networkidle' });
+await page.waitForFunction(() => document.getElementById('data-stamp')?.textContent?.includes('車站'), { timeout: 25000 });
+const g7 = await page.evaluate(() => ({
+	locateHidden: document.getElementById('locate-btn').hidden,
+	gpsHidden: document.getElementById('trip-gps').hidden,
+	relocateDisabled: document.getElementById('nb-relocate').disabled,
+	supported: 'geolocation' in navigator
+}));
+ok(!g7.supported, '[GEO-7] 測試環境已模擬唔支援 geolocation');
+ok(g7.locateHidden && g7.gpsHidden, '[GEO-7] 唔支援 → 定位掣／trip GPS 掣隱藏', JSON.stringify(g7));
+ok(g7.relocateDisabled, '[GEO-7] 唔支援 → 重新定位掣停用');
+
 /* ---------- 10. Console 錯誤 ---------- */
 console.log('\n[10] Console 檢查');
 const realErrors = consoleErrors.filter((e) => !/favicon|ERR_INTERNET|Failed to load resource.*tile|net::/i.test(e));

@@ -941,3 +941,248 @@ button.menu-item:active { background: var(--surface-2); }
 .seq-eta .eta-list { margin-left: auto; }
 .seq-eta .none { color: var(--text-3); font-size: 12px; margin-left: auto; text-align: right; }
 .seq-eta .skel { margin-left: auto; }
+
+/* ============ M11 一鍵定位 ============ */
+
+/* 搜尋頁兩個大掣入口（同一列、平分寬度 —— 2026-10-13 用戶回饋；
+   字級 clamp 適應窄屏，保持大觸控目標，長者友善 —— ADR-002） */
+.quick-actions { padding: 12px 0 4px; display: flex; flex-direction: row; gap: 8px; }
+.qa-btn {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 5px;
+	flex: 1;
+	min-width: 0;
+	min-height: 44px;
+	border: 1.5px solid var(--brand);
+	border-radius: 10px;
+	padding: 10px 4px;
+	font-size: clamp(11.5px, 3.3vw, 14px);
+	font-weight: 600;
+	font-family: inherit;
+	cursor: pointer;
+	transition: background .15s, opacity .15s;
+}
+.qa-btn svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
+.qa-btn.primary { background: var(--brand); color: #fff; }
+.qa-btn.primary:active { background: var(--brand-dark); }
+.qa-btn:not(.primary) { background: var(--brand-soft); color: var(--brand); }
+.qa-btn:not(.primary):active { background: #f7d9dd; }
+.qa-btn:disabled { opacity: .6; cursor: default; }
+
+/* nearby 頁 place-bar 的「重新定位」掣 */
+.place-bar .relocate {
+	flex-shrink: 0;
+	width: 30px;
+	height: 30px;
+	border: 0;
+	border-radius: 50%;
+	background: rgba(179, 18, 27, .08);
+	color: var(--brand);
+	cursor: pointer;
+	display: grid;
+	place-items: center;
+}
+.place-bar .relocate svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.place-bar .relocate:disabled { opacity: .4; cursor: default; }
+.place-bar .relocate.spin svg { animation: spin .7s linear infinite; }
+
+/* GPS 藍點「我」＋精度圈（與地標紅點、九巴紅／城巴黃 pin 區分） */
+.mkr.me.gps {
+	background: #1a73e8;
+	width: 26px !important;
+	height: 26px !important;
+	font-size: 10px;
+}
+
+/* stop-hero 右上角動作組（查去處 + 常到車站星號） */
+.hero-actions {
+	position: absolute;
+	top: 10px;
+	right: 10px;
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
+/* 深色底 icon-btn 變體（白底頁面用；topbar 內原樣式仍白色半透明） */
+.icon-btn.dark { background: var(--surface-2); color: var(--text-2); border: 1px solid var(--border); }
+.icon-btn.dark:active { background: var(--brand-soft); color: var(--brand); }
+
+/* ============ M12 點到點路線頁 ============ */
+
+.trip-inputs {
+	background: var(--surface);
+	padding: 12px 14px;
+	border-bottom: 1px solid var(--border);
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+.trip-field {
+	position: relative;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	background: var(--bg);
+	border: 1.5px solid var(--border);
+	border-radius: 10px;
+	padding: 0 8px 0 12px;
+	transition: border-color .15s;
+}
+.trip-field:focus-within { border-color: var(--brand); background: #fff; }
+.trip-field .dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+.trip-field .dot.o { background: #1a73e8; }
+.trip-field .dot.d { background: var(--brand); }
+.trip-field input {
+	flex: 1;
+	min-width: 0;
+	border: 0;
+	background: transparent;
+	font-size: 15px;
+	padding: 11px 0;
+	outline: none;
+	color: var(--text);
+	font-family: inherit;
+}
+.trip-field input::placeholder { color: var(--text-3); }
+.trip-field .trip-gps { width: 30px; height: 30px; flex-shrink: 0; }
+.trip-field .trip-gps svg { width: 15px; height: 15px; }
+
+/* 對調起點／終點掣：圓形，疊喺兩個輸入欄之間偏右（2026-10-13 用戶建議） */
+.trip-swap {
+	align-self: flex-end;
+	position: relative;
+	z-index: 5;
+	margin: -12px 12px -12px 0;
+	width: 32px;
+	height: 32px;
+	border: 1.5px solid var(--border);
+	border-radius: 50%;
+	background: var(--surface);
+	color: var(--brand);
+	cursor: pointer;
+	display: grid;
+	place-items: center;
+	box-shadow: var(--shadow-lg);
+}
+.trip-swap:active { background: var(--brand-soft); }
+.trip-swap svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+/* 建議清單：絕對定位喺輸入框正下方 */
+.trip-sug {
+	position: absolute;
+	top: calc(100% + 4px);
+	left: 0;
+	right: 0;
+	z-index: 45;
+	background: var(--surface);
+	border: 1px solid var(--border);
+	border-radius: 10px;
+	box-shadow: var(--shadow-lg);
+	overflow: hidden;
+	max-height: 300px;
+	overflow-y: auto;
+}
+.trip-sug[hidden] { display: none; }
+.sug-item {
+	display: block;
+	width: 100%;
+	text-align: left;
+	padding: 9px 12px;
+	background: none;
+	border: 0;
+	border-bottom: 1px solid var(--border);
+	font-family: inherit;
+	cursor: pointer;
+}
+.sug-item:last-child { border-bottom: 0; }
+.sug-item:active { background: var(--surface-2); }
+.sug-name { display: block; font-size: 14px; font-weight: 500; color: var(--text); }
+/* 公司色點同站名保持間距（2026-10-13 用戶回饋） */
+.sug-name .co-dot { margin-right: 6px; }
+.sug-meta { display: block; font-size: 11px; color: var(--text-3); margin-top: 1px; }
+.sug-loading { padding: 10px 12px; font-size: 12px; color: var(--text-3); }
+.sug-head {
+	padding: 7px 12px 3px;
+	font-size: 11px;
+	font-weight: 600;
+	color: var(--text-3);
+	letter-spacing: .05em;
+}
+
+.trip-hint { padding: 18px 16px; font-size: 13px; color: var(--text-2); line-height: 1.6; }
+
+/* 方案卡 */
+.plan { margin: 10px 14px 0; }
+.plan-head {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 12px 14px;
+	border-bottom: 1px solid var(--border);
+}
+.plan-title { font-size: 16px; font-weight: 700; color: var(--brand); }
+.plan-meta { margin-left: auto; font-size: 14px; color: var(--text-2); }
+.walk { padding: 7px 14px; font-size: 14px; color: var(--text-2); background: var(--surface-2); }
+
+.plan-legs { padding: 2px 0; }
+.xfer {
+	margin: 4px 14px;
+	padding: 4px 10px;
+	font-size: 13px;
+	font-weight: 600;
+	color: var(--brand);
+	background: var(--brand-soft);
+	border-radius: 6px;
+}
+/* leg 容器：路線段資訊（唔可撳）；上／落車站 .pt 先係按鈕 */
+.leg {
+	display: block;
+	width: 100%;
+	border-bottom: 1px solid var(--border);
+	padding: 10px 14px;
+}
+.leg:last-child { border-bottom: 0; }
+.leg-line { display: flex; align-items: center; gap: 8px; }
+.leg-no { font-size: 20px; font-weight: 700; color: var(--brand); font-variant-numeric: tabular-nums; }
+.leg-dest { font-size: 14px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.leg-n { font-size: 14px; color: var(--text-2); flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.leg-pts { display: flex; flex-direction: column; gap: 1px; margin-top: 5px; padding-left: 16px; }
+.pt {
+	display: flex;
+	align-items: center;
+	background: none;
+	border: 0;
+	padding: 3px 0;
+	font-family: inherit;
+	font-size: 15px;
+	color: var(--text);
+	cursor: pointer;
+	text-align: left;
+	max-width: 100%;
+}
+.pt:active { opacity: .6; }
+.pt > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pt.up::before { content: '▲ '; font-size: 11px; color: #1a73e8; }
+.pt.down::before { content: '▼ '; font-size: 11px; color: var(--brand); }
+
+/* cap 例外提示（只回直達時） */
+.trip-cap {
+	margin: 10px 14px;
+	padding: 8px 10px;
+	font-size: 12px;
+	color: var(--soon);
+	background: #fdf3e7;
+	border-radius: 8px;
+	line-height: 1.5;
+}
+
+.trip-disclaimer {
+	padding: 14px 16px calc(var(--safe-b) + 24px);
+	font-size: 11px;
+	color: var(--text-3);
+	line-height: 1.6;
+	text-align: center;
+}

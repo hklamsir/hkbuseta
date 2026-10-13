@@ -35,6 +35,7 @@
 	<symbol id="i-chev-down" viewBox="0 0 24 24"><path d="M5 9l7 7 7-7"/></symbol>
 	<symbol id="i-wifi" viewBox="0 0 24 24"><path d="M4.5 9.8a11 11 0 0 1 15 0M7.6 13a6.5 6.5 0 0 1 8.8 0M10.7 16.2a2.8 2.8 0 0 1 2.6 0"/><circle cx="12" cy="18.8" r="1.1"/></symbol>
 	<symbol id="i-doc" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h6"/></symbol>
+	<symbol id="i-swap" viewBox="0 0 24 24"><path d="M8 19V6M8 6L4.8 9.2M8 6l3.2 3.2"/><path d="M16 5v13m0 0l-3.2-3.2M16 18l3.2-3.2"/></symbol>
 </svg>
 
 <div id="app">
@@ -85,6 +86,16 @@
 					<svg><use href="#i-x"/></svg>
 				</button>
 			</div>
+
+			<!-- M11/M12：兩個大掣入口（計劃書 §2.1／§3.3） -->
+			<div class="quick-actions">
+				<button class="qa-btn primary" id="locate-btn" title="用目前位置搵附近 200 米內巴士站">
+					<svg><use href="#i-pin"/></svg><span>用我位置，搵附近巴士站</span>
+				</button>
+				<button class="qa-btn" id="trip-entry" title="輸入起點同終點，搵直達或轉一次車嘅巴士路線">
+					<svg><use href="#i-route"/></svg><span>查點到點路線</span>
+				</button>
+			</div>
 		</div>
 
 		<div id="search-status"></div>
@@ -113,6 +124,10 @@
 		<div class="place-bar">
 			<svg><use href="#i-pin"/></svg>
 			<span class="nm" id="nb-place"></span>
+			<!-- M11：GPS 定位入口時可原地重新定位，唔使返回搜尋頁 -->
+			<button class="relocate" id="nb-relocate" aria-label="重新定位" title="重新定位">
+				<svg><use href="#i-refresh"/></svg>
+			</button>
 		</div>
 
 		<div class="range-bar">
@@ -148,9 +163,15 @@
 				<svg><use href="#i-map"/></svg>
 				<span class="t" id="eta-map-label">附近 200 米地圖</span>
 			</button>
-			<button class="star" id="eta-fav" aria-label="加入常到車站" title="加入常到車站">
-				<svg><use href="#i-star"/></svg>
-			</button>
+			<!-- M12：以當前站做起點，跳去點到點查詢 -->
+			<div class="hero-actions">
+				<button class="icon-btn dark" id="eta-trip" aria-label="以此站為起點查點到點路線" title="查去處">
+					<svg><use href="#i-route"/></svg>
+				</button>
+				<button class="star" id="eta-fav" aria-label="加入常到車站" title="加入常到車站">
+					<svg><use href="#i-star"/></svg>
+				</button>
+			</div>
 		</div>
 
 		<div class="section-title">
@@ -167,6 +188,10 @@
 				<svg><use href="#i-back"/></svg>
 			</button>
 			<h1>路線詳情<span class="sub" id="rt-sub"></span></h1>
+			<!-- M12：以選中站（或此路線）跳去點到點查詢 -->
+			<button class="icon-btn" id="rt-trip" aria-label="以此站為起點查點到點路線" title="查去處">
+				<svg><use href="#i-route"/></svg>
+			</button>
 			<button class="star" id="rt-fav" aria-label="加入常搭路線" title="加入常搭路線">
 				<svg><use href="#i-star"/></svg>
 			</button>
@@ -197,6 +222,44 @@
 		</div>
 
 		<div class="seq-list" id="rt-list"></div>
+	</section>
+
+	<!-- ⑤ 點到點路線查詢（M12） -->
+	<section class="page" id="page-trip">
+		<header class="topbar">
+			<button class="icon-btn" id="trip-back" aria-label="返回">
+				<svg><use href="#i-back"/></svg>
+			</button>
+			<h1>點到點路線<span class="sub">直達或轉一次車</span></h1>
+		</header>
+
+		<div class="trip-inputs">
+			<div class="trip-field">
+				<span class="dot o"></span>
+				<input type="search" id="trip-origin" placeholder="起點：輸入地標" autocomplete="off"
+					enterkeyhint="search" autocorrect="off" autocapitalize="off" spellcheck="false">
+				<button class="icon-btn dark trip-gps" id="trip-gps" aria-label="用目前位置做起點" title="用我位置做起點">
+					<svg><use href="#i-pin"/></svg>
+				</button>
+				<div class="trip-sug" id="trip-origin-sug" hidden></div>
+			</div>
+			<!-- 對調起點／終點（2026-10-13 用戶建議）：疊喺兩欄之間 -->
+			<button class="trip-swap" id="trip-swap" aria-label="對調起點同終點" title="對調起點同終點">
+				<svg><use href="#i-swap"/></svg>
+			</button>
+			<div class="trip-field">
+				<span class="dot d"></span>
+				<input type="search" id="trip-dest" placeholder="終點：輸入地標" autocomplete="off"
+					enterkeyhint="search" autocorrect="off" autocapitalize="off" spellcheck="false">
+				<div class="trip-sug" id="trip-dest-sug" hidden></div>
+			</div>
+		</div>
+
+		<div id="trip-status"></div>
+		<div id="trip-results"></div>
+
+		<!-- 決策乙：唔顯示預估總時間，只出靜態元數據 + 免責 -->
+		<div class="trip-disclaimer">路線與步行距離為靜態資料估算（直線 ×1.3），實際以現場及實時班次為準</div>
 	</section>
 </div>
 
