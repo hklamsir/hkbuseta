@@ -1077,8 +1077,17 @@ button.menu-item:active { background: var(--surface-2); }
 .sug-item:last-child { border-bottom: 0; }
 .sug-item:active { background: var(--surface-2); }
 .sug-name { display: block; font-size: 14px; font-weight: 500; color: var(--text); }
+/* 公司色點同站名保持間距（2026-10-13 用戶回饋） */
+.sug-name .co-dot { margin-right: 6px; }
 .sug-meta { display: block; font-size: 11px; color: var(--text-3); margin-top: 1px; }
 .sug-loading { padding: 10px 12px; font-size: 12px; color: var(--text-3); }
+.sug-head {
+	padding: 7px 12px 3px;
+	font-size: 11px;
+	font-weight: 600;
+	color: var(--text-3);
+	letter-spacing: .05em;
+}
 
 .trip-hint { padding: 18px 16px; font-size: 13px; color: var(--text-2); line-height: 1.6; }
 
@@ -1088,44 +1097,53 @@ button.menu-item:active { background: var(--surface-2); }
 	display: flex;
 	align-items: center;
 	gap: 8px;
-	padding: 10px 14px;
+	padding: 12px 14px;
 	border-bottom: 1px solid var(--border);
 }
-.plan-title { font-size: 14px; font-weight: 700; color: var(--brand); }
-.plan-meta { margin-left: auto; font-size: 12px; color: var(--text-2); }
-.walk { padding: 6px 14px; font-size: 12px; color: var(--text-2); background: var(--surface-2); }
+.plan-title { font-size: 16px; font-weight: 700; color: var(--brand); }
+.plan-meta { margin-left: auto; font-size: 14px; color: var(--text-2); }
+.walk { padding: 7px 14px; font-size: 14px; color: var(--text-2); background: var(--surface-2); }
 
 .plan-legs { padding: 2px 0; }
 .xfer {
 	margin: 4px 14px;
 	padding: 4px 10px;
-	font-size: 11px;
+	font-size: 13px;
 	font-weight: 600;
 	color: var(--brand);
 	background: var(--brand-soft);
 	border-radius: 6px;
 }
+/* leg 容器：路線段資訊（唔可撳）；上／落車站 .pt 先係按鈕 */
 .leg {
 	display: block;
 	width: 100%;
-	text-align: left;
-	background: none;
-	border: 0;
 	border-bottom: 1px solid var(--border);
-	padding: 9px 14px;
-	font-family: inherit;
-	cursor: pointer;
+	padding: 10px 14px;
 }
 .leg:last-child { border-bottom: 0; }
-.leg:active { background: var(--surface-2); }
-.leg-line { display: flex; align-items: center; gap: 7px; }
-.leg-no { font-size: 16px; font-weight: 700; color: var(--brand); font-variant-numeric: tabular-nums; }
-.leg-dest { font-size: 12px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
-.leg-n { font-size: 12px; color: var(--text-2); flex-shrink: 0; font-variant-numeric: tabular-nums; }
-.leg-pts { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; padding-left: 13px; }
-.pt { font-size: 13px; color: var(--text); }
-.pt.up::before { content: '▲ '; font-size: 9px; color: #1a73e8; }
-.pt.down::before { content: '▼ '; font-size: 9px; color: var(--brand); }
+.leg-line { display: flex; align-items: center; gap: 8px; }
+.leg-no { font-size: 20px; font-weight: 700; color: var(--brand); font-variant-numeric: tabular-nums; }
+.leg-dest { font-size: 14px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.leg-n { font-size: 14px; color: var(--text-2); flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.leg-pts { display: flex; flex-direction: column; gap: 1px; margin-top: 5px; padding-left: 16px; }
+.pt {
+	display: flex;
+	align-items: center;
+	background: none;
+	border: 0;
+	padding: 3px 0;
+	font-family: inherit;
+	font-size: 15px;
+	color: var(--text);
+	cursor: pointer;
+	text-align: left;
+	max-width: 100%;
+}
+.pt:active { opacity: .6; }
+.pt > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pt.up::before { content: '▲ '; font-size: 11px; color: #1a73e8; }
+.pt.down::before { content: '▼ '; font-size: 11px; color: var(--brand); }
 
 /* cap 例外提示（只回直達時） */
 .trip-cap {

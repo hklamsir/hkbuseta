@@ -168,7 +168,7 @@
 	 * 為何唔直接顯示 buildId：buildId 係**離線資料**的內容 hash，每日資料更新就會變，
 	 * 用戶會誤以為係新版 app。版本號必須只隨**程式碼**改動而變。
 	 */
-	const VERSION_FALLBACK = '1.4.0';
+	const VERSION_FALLBACK = '1.4.2';
 	let APP_VERSION = VERSION_FALLBACK;
 
 	function renderVersion() {
@@ -2040,6 +2040,37 @@ function setRouteDir(dir, svc, ctx, hint) {
 		let abort = null;
 		let timer = null;
 		const hide = () => { sugEl.hidden = true; sugEl.innerHTML = ''; };
+
+		/**
+		 * focus 且輸入框空白 → 顯示收藏車站（2026-10-13 用戶建議加強 UX）：
+		 * 免打字直接揀常到車站做起／終點。純本機資料，零網絡。
+		 */
+		const showBookmarks = () => {
+			if (inputEl.value.trim()) return;
+			const favs = B.store.favorites.loadAll().slice(0, 8);
+			if (!favs.length) {
+				sugEl.hidden = false;
+				sugEl.innerHTML = '<div class="sug-loading">未有收藏車站 — 喺車站頁撳 ☆ 收藏，下次可以直接揀</div>';
+				return;
+			}
+			sugEl.hidden = false;
+			sugEl.innerHTML = '<div class="sug-head">收藏車站</div>' + favs.map((f, i) =>
+				`<button class="sug-item" data-i="${i}">
+					<span class="sug-name"><i class="co-dot ${esc(f.co || 'kmb')}" title="${esc((B.getAdapter(f.co) || {}).label || '')}"></i>${esc(f.name)}</span>
+				</button>`).join('');
+			sugEl.querySelectorAll('.sug-item').forEach((b) => b.addEventListener('click', () => {
+				const f = favs[+b.dataset.i];
+				inputEl.value = f.name;
+				hide();
+				onPick({ name: f.name, lat: f.lat, lng: f.lng });
+			}));
+		};
+		inputEl.addEventListener('focus', showBookmarks);
+		// 點擊輸入框以外地方 → 收起建議清單（2026-10-13 用戶回饋）
+		document.addEventListener('pointerdown', (e) => {
+			if (!sugEl.hidden && !e.target.closest('.trip-field')) hide();
+		});
+
 		inputEl.addEventListener('input', () => {
 			clearTimeout(timer);
 			abort?.abort();
@@ -2146,15 +2177,19 @@ function setRouteDir(dir, svc, ctx, hint) {
 		const plans = res.plans.slice(0, 8);
 		box.innerHTML = plans.map((p, i) => renderPlanCard(p, i)).join('') +
 			(res.capped ? '<div class="trip-cap">路線較複雜，只顯示直達方案，建議分段查</div>' : '');
-		// 撳上車站 → 該站 ETA（必須帶 co —— 跨公司 co 鐵律）
-		box.querySelectorAll('.leg').forEach((b) => {
+		// 撳上車／落車站 → 跳去該巴士線嘅「路線詳情」頁並高亮該站
+		// （2026-10-13 用戶回饋：原本跳 ETA 頁睇唔到條線行邊，改跳路線詳情。
+		//   openRoute 經 setRouteDir → pickBySeqs（stopIds 精確匹配、seq 後備）
+		//   → selectStop({scroll:true}) 高亮 + inline 展開該站實時 ETA。）
+		box.querySelectorAll('.leg .pt').forEach((b) => {
 			b.addEventListener('click', () => {
 				const p = plans[+b.dataset.p];
 				const leg = p && p.legs[+b.dataset.l];
 				if (!leg) return;
-				openEta({
-					stop: leg.from.stop, co: leg.from.co, name: leg.from.name,
-					lat: leg.from.lat, lng: leg.from.lng
+				const st = b.dataset.role === 'from' ? leg.from : leg.to;
+				openRoute({
+					no: leg.route, dir: leg.bound, svc: leg.svc, dest: leg.dest, co: leg.co,
+					stopIds: [st.stop], seqs: [st.seq]
 				});
 			});
 		});
@@ -2177,7 +2212,7 @@ function setRouteDir(dir, svc, ctx, hint) {
 				legs.push(`<div class="xfer">${esc(xferTxt)}</div>`);
 			}
 			const a = B.getAdapter(leg.co);
-			legs.push(`<button class="leg" data-p="${idx}" data-l="${li}" title="查看 ${esc(splitCode(leg.from.name).base)} 實時到站時間">
+			legs.push(`<div class="leg">
 				<span class="leg-line">
 					<i class="co-dot ${esc(leg.co)}" title="${esc(a ? a.label : leg.co)}"></i>
 					<b class="leg-no">${esc(leg.route)}</b>
@@ -2185,10 +2220,12 @@ function setRouteDir(dir, svc, ctx, hint) {
 					<span class="leg-n">${leg.stops} 站</span>
 				</span>
 				<span class="leg-pts">
-					<span class="pt up">${esc(splitCode(leg.from.name).base)}</span>
-					<span class="pt down">${esc(splitCode(leg.to.name).base)}</span>
+					<button class="pt up" data-p="${idx}" data-l="${li}" data-role="from"
+						title="睇 ${esc(splitCode(leg.from.name).base)} 呢條線嘅路線詳情">${esc(splitCode(leg.from.name).base)}</button>
+					<button class="pt down" data-p="${idx}" data-l="${li}" data-role="to"
+						title="睇 ${esc(splitCode(leg.to.name).base)} 呢條線嘅路線詳情">${esc(splitCode(leg.to.name).base)}</button>
 				</span>
-			</button>`);
+			</div>`);
 		});
 		return `<div class="card plan">
 			<div class="plan-head">

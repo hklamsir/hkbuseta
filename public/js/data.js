@@ -989,6 +989,35 @@
 	const WALK_FACTOR = 1.3;       // 直線距離 → 路網步行距離估算因子
 
 	/**
+	 * 站名匹配（2026-10-13 用戶回饋）：
+	 * 目的地/起點名稱同候選站名有 ≥2 個連續字相同 → 視為「名實相符」候選。
+	 * 案例：高鐵西九龍站 —— OSM 命中點到「佐敦炮台街」直線 234 米，近過
+	 * 「佐敦道,高鐵站」嘅 331 米，但西九龍站係巨型街區，直線×1.3 喺呢度嚴重失真；
+	 * 用戶（同任何正常人）都期望喺站名有「高鐵」嘅站落車。
+	 * 所以去重排序時：名實相符優先，先至比步行距離。
+	 */
+	function nameNorm(s) {
+		return String(s || '').replace(/[^\p{Script=Han}\p{L}\p{N}]/gu, '');
+	}
+	/** 最長共同子字串長度（站名短，DP O(nm) 成本可忽略） */
+	function lcsLen(a, b) {
+		let best = 0;
+		let prev = new Array(b.length + 1).fill(0);
+		for (let i = 1; i <= a.length; i++) {
+			const cur = [0];
+			for (let j = 1; j <= b.length; j++) {
+				cur[j] = a[i - 1] === b[j - 1] ? prev[j - 1] + 1 : 0;
+				if (cur[j] > best) best = cur[j];
+			}
+			prev = cur;
+		}
+		return best;
+	}
+	function nameMatch(a, b) {
+		return lcsLen(nameNorm(a), nameNorm(b)) >= 2;
+	}
+
+	/**
 	 * 某站（連同其跨公司 cross 配對站）的完整物理站成員清單（含座標與站名）。
 	 * 用於「落車後步行 0 米轉對面公司上車」的轉車站展開。
 	 */
@@ -1053,6 +1082,10 @@
 			if (d < g.walk) { g.walk = d; g.name = c.name; }
 			g.members.push({ co: c.co, stop: c.stop, name: c.name, lat: c.lat, lng: c.lng });
 		}
+		// 名實相符旗標：端點名稱同群內任一成員站名有 ≥2 字相同（見上方 nameMatch 註解）
+		for (const g of groups.values()) {
+			g.nm = center.name ? g.members.some((m) => nameMatch(center.name, m.name)) : false;
+		}
 		return [...groups.values()];
 	}
 
@@ -1103,34 +1136,40 @@
 				transfers, legs,
 				walkOriginM: Math.round(walkO * WALK_FACTOR),
 				walkDestM: Math.round(walkD * WALK_FACTOR),
-				totalStops
+				totalStops,
+				score: 0   // 名實相符分數（0–2：起點側 + 終點側）
 			};
 		};
 		const plans = [];
 
-		/* ---- ① 直達：同一 (route,bound,svc) 且 seq(上) < seq(落)（R-G） ---- */
+		/* ---- ① 直達：同一 (co,route,bound,svc) 且 seq(上) < seq(落)（R-G） ---- */
 		{
-			// dest 側索引：route|bound|svc → [{seq, gi, member, dest}]
+			const idx = crossIndex(stores.ctb);
+			// dest 側索引：co|route|bound|svc → [{seq, gi, member, dest}]
+			// ⚠️ key 必須含 co（2026-10-13 用戶回饋）：一趟實體巴士只屬一家公司，
+			//    站序唔可以跨公司混搭 —— 九巴 40（荃灣↔麗港城）同城巴 40（華富↔會展）
+			//    係完全不同服務撞號，route|bound 相同但根本唔係同一條巴士。
 			const dIdx = new Map();
 			dGroups.forEach((g, gi) => {
 				for (const m of g.members) {
 					const store = stores[m.co];
 					if (!store) continue;
 					for (const r of getStopRoutes(store, m.stop)) {
-						const k = `${r.route}|${r.bound}|${r.svc}`;
+						const k = `${m.co}|${r.route}|${r.bound}|${r.svc}`;
 						if (!dIdx.has(k)) dIdx.set(k, []);
 						dIdx.get(k).push({ seq: r.seq, gi, member: m, dest: r.dest });
 					}
 				}
 			});
-			// 去重：同一走廊（route|bound）只留站數最少一條（跨公司同號合併，計劃書 §3.2）
+			// 去重：真聯營線（cross.dirs 有收錄，兩家同走廊已 build 驗證）跨公司合併；
+			// 撞號線（dirs 無收錄，如 40/40P/1/5）按公司分開，唔可以合併。
 			const best = new Map();
 			for (const og of oGroups) {
 				for (const m of og.members) {
 					const store = stores[m.co];
 					if (!store) continue;
 					for (const r of getStopRoutes(store, m.stop)) {
-						const hits = dIdx.get(`${r.route}|${r.bound}|${r.svc}`);
+						const hits = dIdx.get(`${m.co}|${r.route}|${r.bound}|${r.svc}`);
 						if (!hits) continue;
 						for (const h of hits) {
 							if (h.seq <= r.seq) continue;   // 方向必須正確
@@ -1141,14 +1180,17 @@
 								stops: h.seq - r.seq
 							};
 							const p = mkPlan(0, [leg], og.walk, dGroups[h.gi].walk);
-							const k = `${r.route}|${r.bound}`;
+							p.score = (og.nm ? 1 : 0) + (dGroups[h.gi].nm ? 1 : 0);
+							// 同走廊去重 key（見上方註解：聯營合併、撞號分開）
+							const k = idx && idx.dirs[r.route]
+								? `${r.route}|${normalizeDir(idx, r.route, r.bound, m.co).key}`
+								: `${m.co}|${r.route}|${r.bound}`;
 							const prev = best.get(k);
-							if (!prev || p.totalStops < prev.totalStops ||
-								(p.totalStops === prev.totalStops &&
-									p.walkOriginM + p.walkDestM < prev.walkOriginM + prev.walkDestM)) {
-								best.set(k, p);
-							}
-							break;   // 同一 (o entry, d entry) 一個命中已夠（svc 變體由 best 去重，R-E 已覆蓋）
+							// 2026-10-13 用戶實測回饋：同一路線多個可能上／落車站時，
+							// ① 名實相符（站名同端點名有 ≥2 字相同）優先 → ② 步行最近 → ③ 站數。
+							// ⚠️ 呢度唔可以 break：每個沿線落車候選都要參與比較
+							//（2026-10-13 修正：原本只睇第一個命中，較合適嘅落車站有機會落選）。
+							if (!prev || betterPlan(p, prev)) best.set(k, p);
 						}
 					}
 				}
@@ -1213,13 +1255,10 @@
 											stops: h.seq - rb.seq
 										};
 										const plan = mkPlan(1, [legA, legB], og.walk, dGroups[h.gi].walk);
+										plan.score = (og.nm ? 1 : 0) + (dGroups[h.gi].nm ? 1 : 0);
 										const k = `${m.co}|${r.route}|${r.bound}|${p.co}|${rb.route}|${rb.bound}`;
 										const prev = bestT.get(k);
-										if (!prev || plan.totalStops < prev.totalStops ||
-											(plan.totalStops === prev.totalStops &&
-												plan.walkOriginM + plan.walkDestM < prev.walkOriginM + prev.walkDestM)) {
-											bestT.set(k, plan);
-										}
+										if (!prev || betterPlan(plan, prev)) bestT.set(k, plan);
 									}
 								}
 							}
@@ -1233,8 +1272,25 @@
 			capped = true;   // 物理站超上限（極端密集區）→ 只回直達
 		}
 
-		plans.sort((a, b) => a.transfers - b.transfers || a.totalStops - b.totalStops ||
-			(a.walkOriginM + a.walkDestM) - (b.walkOriginM + b.walkDestM));
+		/**
+		 * 同一走廊去重時嘅方案比較（2026-10-13 兩輪用戶回饋修訂）：
+		 * ① 名實相符（站名同起/終點名 ≥2 字相同，解決西九龍站類大型街區
+		 *    直線距離失真問題）→ ② 總步行距離 → ③ 站數。
+		 * 原本「站數優先」會揀遠站上車（290A 案例）；
+		 * 「純步行距離」會揀名稱完全唔相干嘅站（佐敦炮台街案例）。
+		 */
+		function betterPlan(a, b) {
+			if (a.score !== b.score) return a.score > b.score;
+			const wa = a.walkOriginM + a.walkDestM;
+			const wb = b.walkOriginM + b.walkDestM;
+			if (wa !== wb) return wa < wb;
+			return a.totalStops < b.totalStops;
+		}
+
+		plans.sort((a, b) => a.transfers - b.transfers ||
+			b.score - a.score ||
+			(a.walkOriginM + a.walkDestM) - (b.walkOriginM + b.walkDestM) ||
+			a.totalStops - b.totalStops);
 		return { plans, capped, reason: null, oCount: oGroups.length, dCount: dGroups.length };
 	}
 
