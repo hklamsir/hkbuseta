@@ -1815,6 +1815,26 @@ ok(t14.kept === 1 && t14.filtered === 1,
 	'[TRIP-14] 班次過濾：確認冇班次 (false) 剔除；查唔到 (missing/null) fail-open 保留',
 	`kept=${t14.kept} filtered=${t14.filtered}`);
 
+// [TRIP-15] 同走廊轉乘禁令（2026-10-13 用戶實測迴歸：103 搭 1 站走、過對面轉
+// 103 反方向搭 13 站返 —— 直接行過對面搭就得）。結構性不變式：任何轉車方案
+// 兩段唔可以同走廊（同公司同路線，或聯營線跨公司同號）。
+const t15 = await page.evaluate(() => {
+	const B = window.BusETA;
+	const DBS = window.__DBS;
+	const o = DBS.kmb.stopById.get('18492910339410B1');
+	let d = null;
+	for (const [, s] of DBS.kmb.stopById) { if (String(s.name).includes('筲箕灣')) { d = s; break; } }
+	const res = B.planTrip(DBS, { lat: o.lat, lng: o.lng, name: o.name }, { lat: d.lat, lng: d.lng, name: d.name }, { maxTransfers: 1 });
+	const idx = B.crossIndex(DBS.ctb);
+	const bad = res.plans.filter((p) => p.transfers === 1 &&
+		p.legs[0].route === p.legs[1].route &&
+		(p.legs[0].co === p.legs[1].co || !!idx.dirs[p.legs[0].route]));
+	return { total: res.plans.length, bad: bad.length };
+});
+ok(t15.total > 0 && t15.bad === 0,
+	'[TRIP-15] 轉車方案無同走廊轉乘（同路線反方向「搭走再搭返嚟」已被禁）',
+	`plans=${t15.total} bad=${t15.bad}`);
+
 /* ---------- 9e. M12 trip 頁 UI（[TRIP-UI-*]） ---------- */
 console.log('\n[9e] M12 trip 頁 UI');
 // [UI-QA-1] 首頁兩個入口掣同一列（2026-10-13 用戶回饋：原本上下疊太佔位）
