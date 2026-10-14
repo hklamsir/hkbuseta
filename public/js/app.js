@@ -2583,8 +2583,7 @@ function setRouteDir(dir, svc, ctx, hint) {
 
 	/* Service Worker（規劃書 §5.5）：註冊 + 偵測新版提示重載 */
 	let swReg = null;
-	//const DATA_STALE_MAX_AGE_MS = 30 * 3600 * 1000; // 30 小時：每日 05:30 更新，錯過一次即過期
-	const DATA_STALE_MAX_AGE_MS = 60 * 1000; // 30 小時：每日 05:30 更新，錯過一次即過期
+	const DATA_STALE_MAX_AGE_MS = 30 * 3600 * 1000; // 30 小時：每日 05:30 更新，錯過一次即過期
 
 	let stalePrompted = false;
 
