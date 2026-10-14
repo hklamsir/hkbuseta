@@ -324,6 +324,14 @@
 
 <div class="toast" id="toast"></div>
 
+<!-- 更新提示橫幅：有新版本 / 離線資料過舊時出現（規劃書 §5.5 補強） -->
+<div class="update-bar" id="update-bar">
+	<svg class="ub-ico"><use href="#i-warn"/></svg>
+	<span id="update-bar-msg"></span>
+	<button id="update-bar-reload">重新整理</button>
+	<button class="dismiss" id="update-bar-dismiss">稍後</button>
+</div>
+
 <script src="vendor/leaflet.js"></script>
 <script src="js/data.js"></script>
 <script src="js/app.js"></script>

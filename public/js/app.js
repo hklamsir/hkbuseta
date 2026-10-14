@@ -168,7 +168,7 @@
 	 * 為何唔直接顯示 buildId：buildId 係**離線資料**的內容 hash，每日資料更新就會變，
 	 * 用戶會誤以為係新版 app。版本號必須只隨**程式碼**改動而變。
 	 */
-	const VERSION_FALLBACK = '1.5.0';
+	const VERSION_FALLBACK = '1.5.1';
 	let APP_VERSION = VERSION_FALLBACK;
 
 	function renderVersion() {
@@ -2534,6 +2534,32 @@ function setRouteDir(dir, svc, ctx, hint) {
 		toastTimer = setTimeout(() => t.classList.remove('on'), 2200);
 	}
 
+	// 更新提示橫幅（規劃書 §5.5 補強）：有新版本 / 離線資料過舊時出現
+	function showUpdateBar(msg, opts) {
+		opts = opts || {};
+		const bar = $('update-bar');
+		const msgEl = $('update-bar-msg');
+		const reloadBtn = $('update-bar-reload');
+		const dismissBtn = $('update-bar-dismiss');
+		msgEl.textContent = msg;
+		reloadBtn.onclick = () => {
+			hideUpdateBar();
+			(opts.onReload || (() => location.reload()))();
+		};
+		if (opts.dismissible) {
+			dismissBtn.hidden = false;
+			dismissBtn.onclick = hideUpdateBar;
+		} else {
+			dismissBtn.hidden = true;
+			dismissBtn.onclick = null;
+		}
+		bar.classList.add('show');
+	}
+
+	function hideUpdateBar() {
+		$('update-bar').classList.remove('show');
+	}
+
 	function updateNetState() {
 		const el = $('net-state');
 		const paint = () => {
@@ -2552,12 +2578,70 @@ function setRouteDir(dir, svc, ctx, hint) {
 		if (onPage('eta') && Date.now() - state.lastFetch >= pollMs()) fetchEta();
 		// 路線頁只在有選中站時輪詢（選中站為 null 時沒有可查的資料）
 		if (onPage('route') && state.routeSel && Date.now() - state.routeLastFetch >= pollMs()) fetchRouteStopEta();
+		checkForUpdates(); // 切返前台時順便查有無新版 / 資料過舊
 	});
 
-	/* Service Worker（規劃書 §5.5） */
-	if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
-		addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch((e) => console.warn('[sw]', e)));
+	/* Service Worker（規劃書 §5.5）：註冊 + 偵測新版提示重載 */
+	let swReg = null;
+	//const DATA_STALE_MAX_AGE_MS = 30 * 3600 * 1000; // 30 小時：每日 05:30 更新，錯過一次即過期
+	const DATA_STALE_MAX_AGE_MS = 60 * 1000; // 30 小時：每日 05:30 更新，錯過一次即過期
+
+	let stalePrompted = false;
+
+	function setupServiceWorker() {
+		if (!('serviceWorker' in navigator) || !location.protocol.startsWith('http')) return;
+		addEventListener('load', () => {
+			navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' })
+				.then((reg) => {
+					swReg = reg;
+					// 發現新版本正在安裝 → 裝好後（且已有舊版在控制）提示用戶重載
+					reg.addEventListener('updatefound', () => {
+						const sw = reg.installing;
+						if (!sw) return;
+						sw.addEventListener('statechange', () => {
+							if (sw.state === 'installed' && navigator.serviceWorker.controller) {
+								showUpdateBar('有新版本可用，重新整理以更新程式', {
+									onReload: () => location.reload(),
+									dismissible: false,
+								});
+							}
+						});
+					});
+				})
+				.catch((e) => console.warn('[sw]', e));
+		});
 	}
+
+	// 離線資料打包時間 → Date（'YYYY-MM-DD HH:MM' 視為本地時間）
+	function parseDataUpdated(s) {
+		if (!s || s === '未知') return null;
+		const t = new Date(String(s).replace(' ', 'T'));
+		return isNaN(t.getTime()) ? null : t;
+	}
+
+	// 開 tab 期間定時檢查：離線資料過舊就溫馨提示重新整理
+	function checkDataStale() {
+		if (stalePrompted || !DB || !DB.updated) return;
+		const built = parseDataUpdated(DB.updated);
+		if (!built) return;
+		if (Date.now() - built.getTime() > DATA_STALE_MAX_AGE_MS) {
+			stalePrompted = true;
+			showUpdateBar(`離線資料已過期（更新於 ${DB.updated}），重新整理以獲取最新路線`, {
+				onReload: () => location.reload(),
+				dismissible: true,
+			});
+		}
+	}
+
+	// 一次過檢查：有無新版本 SW + 離線資料過舊
+	function checkForUpdates() {
+		if (swReg) { try { swReg.update(); } catch { /* 忽略：下次再查 */ } }
+		checkDataStale();
+	}
+
+	setupServiceWorker();
+	// 每 30 分鐘主動查一次（長開 tab 唔會漏咗每日更新）
+	setInterval(checkForUpdates, 30 * 60 * 1000);
 
 	/* ============ History API 接線（M10） ============ */
 
@@ -2586,5 +2670,5 @@ function setRouteDir(dir, svc, ctx, hint) {
 	// 版本號：manifest.json 為單一真相來源（已在 SW 預快取清單內，離線亦讀到）
 	loadVersion();
 
-	boot();
+	boot().then(() => checkForUpdates());
 })();

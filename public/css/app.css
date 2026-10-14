@@ -720,22 +720,32 @@ button.menu-item:active { background: var(--surface-2); }
 }
 .toast.on { opacity: 1; transform: translateX(-50%) translateY(0); }
 
-/* 更新可用橫幅 */
+/* 更新提示橫幅（規劃書 §5.5 補強）：浮於底部，唔遮住頂部工具列 */
 .update-bar {
 	position: fixed;
 	left: 0; right: 0;
-	top: 0;
+	bottom: calc(var(--safe-b) + 64px);
 	z-index: 1100;
-	background: #1a1d21;
-	color: #fff;
-	padding: calc(var(--safe-t) + 10px) 14px 10px;
-	display: flex;
+	display: none;
 	align-items: center;
 	gap: 10px;
+	margin: 0 10px;
+	padding: 10px 14px;
+	border-radius: 10px;
+	background: #1a1d21;
+	color: #fff;
 	font-size: 13px;
+	line-height: 1.4;
+	box-shadow: var(--shadow-lg);
 }
+.update-bar.show { display: flex; }
+.update-bar .ub-ico {
+	width: 16px; height: 16px;
+	flex-shrink: 0;
+	fill: none; stroke: currentColor; stroke-width: 2;
+}
+.update-bar #update-bar-msg { flex: 1 1 auto; min-width: 0; }
 .update-bar button {
-	margin-left: auto;
 	background: #fff;
 	color: var(--text);
 	border: 0;
@@ -747,6 +757,14 @@ button.menu-item:active { background: var(--surface-2); }
 	cursor: pointer;
 	flex-shrink: 0;
 }
+.update-bar button.dismiss {
+	margin-left: 0;
+	background: none;
+	color: rgba(255, 255, 255, .7);
+	font-weight: 400;
+	padding: 6px 8px;
+}
+.update-bar button.dismiss[hidden] { display: none; }
 
 /* ============ 頁尾 ============ */
 
