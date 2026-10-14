@@ -168,7 +168,7 @@
 	 * 為何唔直接顯示 buildId：buildId 係**離線資料**的內容 hash，每日資料更新就會變，
 	 * 用戶會誤以為係新版 app。版本號必須只隨**程式碼**改動而變。
 	 */
-	const VERSION_FALLBACK = '1.4.5';
+	const VERSION_FALLBACK = '1.5.0';
 	let APP_VERSION = VERSION_FALLBACK;
 
 	function renderVersion() {
@@ -890,6 +890,16 @@
 		if (e.key === 'Escape' && !$('menu-panel').hidden) closeMenu();
 	});
 
+	/* ============ 使用說明頁（2026-10-14） ============ */
+
+	// 選單 → 說明頁：closeMenu 後照常 go()（pushState，系統返回可層層退）
+	$('menu-help').addEventListener('click', () => {
+		closeMenu();
+		go('help');
+	});
+	// 說明頁只有上一層（搜尋頁），fallback 寫死 search
+	$('help-back').addEventListener('click', () => goBack('page-search'));
+
 	/* ============ M3 附近站列表 ============ */
 
 	/* ============ M11 一鍵定位（ADR-002） ============ */
@@ -970,6 +980,7 @@
 			};
 			state.place = p;
 			$('nb-place').textContent = placeLabel(p);
+			$('nb-sub').textContent = placeLabel(p);   // topbar 常駐同步
 			renderNearby();   // 地圖已開啟時 renderNearby 內部會同步重繪
 			toast('已重新定位');
 		} catch (e) {
@@ -1010,7 +1021,8 @@
 		state.place = place;
 		// GPS 定位入口時顯示「目前位置 ±acc 米」（M11）
 		$('nb-place').textContent = placeLabel(place);
-		$('nb-sub').textContent = '';
+		// 頁首常駐：地標名寫入 sticky topbar，scroll 落去都睇到目前位置
+		$('nb-sub').textContent = placeLabel(place);
 		go('nearby');
 		renderNearby();
 	}
@@ -1667,7 +1679,8 @@
 		const v = B.store.routeVisits.visit(rco, opts.no, opts.dir);
 
 		$('rt-no').textContent = opts.no;
-		$('rt-sub').textContent = '';
+		// 頁首常駐：路線號 + 往終點寫入 sticky topbar（scroll 落去都睇到行緊邊條線）
+		$('rt-sub').textContent = opts.dest ? `${opts.no} 往 ${opts.dest}` : opts.no;
 		syncRouteFavBtn();
 		go('route');
 
@@ -1728,6 +1741,8 @@ function setRouteDir(dir, svc, ctx, hint) {
 		state.route.dest = meta[3];
 		state.route.svc = meta[2];
 		$('rt-dest').textContent = `往 ${meta[3]}`;
+		// 方向切換後 topbar sub 同步更新（svc fallback 可能改變終點名）
+		$('rt-sub').textContent = `${state.route.no} 往 ${meta[3]}`;
 		$('rt-count').textContent = `${res.stops.length} 站`;
 		const svcTag = $('rt-svc');
 		if (meta[2] && meta[2] !== 1) {

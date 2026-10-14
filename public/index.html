@@ -36,6 +36,7 @@
 	<symbol id="i-wifi" viewBox="0 0 24 24"><path d="M4.5 9.8a11 11 0 0 1 15 0M7.6 13a6.5 6.5 0 0 1 8.8 0M10.7 16.2a2.8 2.8 0 0 1 2.6 0"/><circle cx="12" cy="18.8" r="1.1"/></symbol>
 	<symbol id="i-doc" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 13h6M9 17h6"/></symbol>
 	<symbol id="i-swap" viewBox="0 0 24 24"><path d="M8 19V6M8 6L4.8 9.2M8 6l3.2 3.2"/><path d="M16 5v13m0 0l-3.2-3.2M16 18l3.2-3.2"/></symbol>
+	<symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.4 9.3a2.7 2.7 0 1 1 3.9 2.4c-.9.45-1.3 1-1.3 1.9"/><path d="M12 16.6v.2"/></symbol>
 </svg>
 
 <div id="app">
@@ -43,6 +44,7 @@
 	<!-- ① 搜尋頁 -->
 	<section class="page active" id="page-search">
 		<header class="topbar">
+			<img class="app-logo" src="icons/icon.svg" alt="" width="30" height="30">
 			<h1>HK Bus ETA<span class="sub" id="app-sub">香港巴士到站時間</span></h1>
 			<div class="menu-wrap">
 				<button class="icon-btn" id="menu-btn" aria-label="開啟選單" aria-expanded="false" aria-controls="menu-panel" title="選單">
@@ -59,13 +61,20 @@
 						<div class="mi-desc"><span id="net-state"></span></div>
 					</div>
 				</div>
-				<div class="menu-item">
-					<svg class="mi-ico"><use href="#i-doc"/></svg>
-					<div class="mi-body">
-						<div class="mi-title">資料來源</div>
-						<div class="mi-desc" id="data-attribution"></div>
-					</div>
+			<div class="menu-item">
+				<svg class="mi-ico"><use href="#i-doc"/></svg>
+				<div class="mi-body">
+					<div class="mi-title">資料來源</div>
+					<div class="mi-desc" id="data-attribution"></div>
 				</div>
+			</div>
+			<button class="menu-item" id="menu-help">
+				<svg class="mi-ico"><use href="#i-help"/></svg>
+				<div class="mi-body">
+					<div class="mi-title">使用說明</div>
+					<div class="mi-desc">點樣搵站、查路線、離線使用與個人化功能</div>
+				</div>
+			</button>
 				<button class="menu-item danger" id="clear-data">
 					<svg class="mi-ico"><use href="#i-trash"/></svg>
 					<div class="mi-body">
@@ -121,24 +130,27 @@
 			</button>
 		</header>
 
-		<div class="place-bar">
-			<svg><use href="#i-pin"/></svg>
-			<span class="nm" id="nb-place"></span>
-			<!-- M11：GPS 定位入口時可原地重新定位，唔使返回搜尋頁 -->
-			<button class="relocate" id="nb-relocate" aria-label="重新定位" title="重新定位">
-				<svg><use href="#i-refresh"/></svg>
-			</button>
-		</div>
-
-		<div class="range-bar">
-			<div class="range-seg" id="range-seg">
-				<button data-r="100">100米</button>
-				<button data-r="200" class="on">200米</button>
-				<button data-r="500">500米</button>
+		<!-- 頁首資訊常駐：place-bar＋範圍列整組 sticky（scroll 時地標名唔會消失） -->
+		<div class="sticky-sub">
+			<div class="place-bar">
+				<svg><use href="#i-pin"/></svg>
+				<span class="nm" id="nb-place"></span>
+				<!-- M11：GPS 定位入口時可原地重新定位，唔使返回搜尋頁 -->
+				<button class="relocate" id="nb-relocate" aria-label="重新定位" title="重新定位">
+					<svg><use href="#i-refresh"/></svg>
+				</button>
 			</div>
-			<button class="map-btn" id="nb-map2">
-				<svg><use href="#i-map"/></svg><span>地圖</span>
-			</button>
+
+			<div class="range-bar">
+				<div class="range-seg" id="range-seg">
+					<button data-r="100">100米</button>
+					<button data-r="200" class="on">200米</button>
+					<button data-r="500">500米</button>
+				</div>
+				<button class="map-btn" id="nb-map2">
+					<svg><use href="#i-map"/></svg><span>地圖</span>
+				</button>
+			</div>
 		</div>
 
 		<div class="section-title" id="nb-count"></div>
@@ -157,20 +169,23 @@
 			</button>
 		</header>
 
-		<div class="stop-hero">
-			<div class="nm" id="eta-name"></div>
-			<button class="map-link" id="eta-map" aria-label="顯示附近 200 米地圖" title="顯示附近 200 米地圖">
-				<svg><use href="#i-map"/></svg>
-				<span class="t" id="eta-map-label">附近 200 米地圖</span>
-			</button>
-			<!-- M12：以當前站做起點，跳去點到點查詢 -->
-			<div class="hero-actions">
-				<button class="icon-btn dark" id="eta-trip" aria-label="以此站為起點查點到點路線" title="查去處">
-					<svg><use href="#i-route"/></svg>
+		<!-- 頁首資訊常駐：stop-hero 整組 sticky（scroll 時站名唔會消失） -->
+		<div class="sticky-sub">
+			<div class="stop-hero">
+				<div class="nm" id="eta-name"></div>
+				<button class="map-link" id="eta-map" aria-label="顯示附近 200 米地圖" title="顯示附近 200 米地圖">
+					<svg><use href="#i-map"/></svg>
+					<span class="t" id="eta-map-label">附近 200 米地圖</span>
 				</button>
-				<button class="star" id="eta-fav" aria-label="加入常到車站" title="加入常到車站">
-					<svg><use href="#i-star"/></svg>
-				</button>
+				<!-- M12：以當前站做起點，跳去點到點查詢 -->
+				<div class="hero-actions">
+					<button class="icon-btn dark" id="eta-trip" aria-label="以此站為起點查點到點路線" title="查去處">
+						<svg><use href="#i-route"/></svg>
+					</button>
+					<button class="star" id="eta-fav" aria-label="加入常到車站" title="加入常到車站">
+						<svg><use href="#i-star"/></svg>
+					</button>
+				</div>
 			</div>
 		</div>
 
@@ -197,21 +212,24 @@
 			</button>
 		</header>
 
-		<div class="route-hero">
-			<div class="no" id="rt-no"></div>
-			<div class="meta">
-				<span id="rt-dest"></span>
-				<span class="svc-tag" id="rt-svc" hidden></span>
-				<span class="ct" id="rt-count"></span>
+		<!-- 頁首資訊常駐：route-hero＋方向分頁整組 sticky（scroll 時路線資訊唔會消失） -->
+		<div class="sticky-sub">
+			<div class="route-hero">
+				<div class="no" id="rt-no"></div>
+				<div class="meta">
+					<span id="rt-dest"></span>
+					<span class="svc-tag" id="rt-svc" hidden></span>
+					<span class="ct" id="rt-count"></span>
+				</div>
 			</div>
-		</div>
 
-		<!-- 方向分頁：零網絡請求（離線站序已含 O/I 兩方向） -->
-		<div class="range-bar" style="padding-top:10px">
-			<div class="dir-tabs" id="rt-dirs"></div>
-			<button class="icon-btn" id="rt-refresh" aria-label="立即更新" title="立即更新" style="margin-left:8px">
-				<svg><use href="#i-refresh"/></svg>
-			</button>
+			<!-- 方向分頁：零網絡請求（離線站序已含 O/I 兩方向） -->
+			<div class="range-bar" style="padding-top:10px">
+				<div class="dir-tabs" id="rt-dirs"></div>
+				<button class="icon-btn" id="rt-refresh" aria-label="立即更新" title="立即更新" style="margin-left:8px">
+					<svg><use href="#i-refresh"/></svg>
+				</button>
+			</div>
 		</div>
 
 		<div class="seq-hint" id="rt-hint" hidden></div>
@@ -260,6 +278,39 @@
 
 		<!-- 決策乙：唔顯示預估總時間，只出靜態元數據 + 免責 -->
 		<div class="trip-disclaimer">路線與步行距離為靜態資料估算（直線 ×1.3），實際以現場及實時班次為準</div>
+	</section>
+
+	<!-- ⑥ 使用說明（漢堡選單進入，2026-10-14） -->
+	<section class="page" id="page-help">
+		<header class="topbar">
+			<button class="icon-btn" id="help-back" aria-label="返回">
+				<svg><use href="#i-back"/></svg>
+			</button>
+			<h1>使用說明</h1>
+		</header>
+
+		<div class="help-body">
+			<h2>🔍 搵附近巴士站</h2>
+			<p>喺首頁輸入地標（商場、大廈、碼頭都得），揀個命中點就會列出 100／200／500 米內嘅巴士站；或者直接撳<span class="em">「用我位置，搵附近巴士站」</span>用 GPS 定位。範圍列右邊有「地圖」掣，可以喺地圖上睇晒附近站。</p>
+
+			<h2>🕐 睇實時到站時間</h2>
+			<p>喺附近站列表撳任何一個站，就會見到該站所有路線嘅實時到站時間，每 15 秒自動更新。撳任何一行路線，可以睇該路線全線站序同埋選中站嘅到站時間。</p>
+
+			<h2>🚌 查點到點路線</h2>
+			<p>首頁撳<span class="em">「查點到點路線」</span>，輸入起點同終點，會自動建議直達或轉一次車嘅巴士方案，並附上步行距離。到站時間頁同路線詳情頁右上的「查去處」掣，可以直接用該站做起點。</p>
+
+			<h2>⭐ 常搭路線與常到車站</h2>
+			<p>喺到站時間頁撳星號 = 記住<span class="em">常到車站</span>；喺路線詳情頁撳星號 = 記住<span class="em">常搭路線</span>。常用嘅嘢會自動出現喺首頁，方便一撣即達。常搭路線亦可自動統計（同一條線查看第二次起才計），唔想再見到可以逐項移除。</p>
+
+			<h2>✈️ 離線使用</h2>
+			<p>全港巴士站同路線站序已預先離線打包，<span class="em">冇網絡都搵到站、睇到站序</span>；只有實時到站時間需要上網。安裝到主畫面（手機瀏覽器 → 「加入主畫面／安裝應用程式」）之後可以像一般 App 咁離線打開。</p>
+
+			<h2>🔒 私隱</h2>
+			<p>冇帳號、冇追蹤。搜尋記錄、常搭路線同 GPS 座標只會留喺你部機度（GPS 絕對唔會傳送畀任何第三方），可以喺選單「清除本機所有資料」一鍵刪除。</p>
+
+			<h2>📖 資料來源</h2>
+			<p>實時到站時間同路線資料來自運輸署開放數據（九巴及龍運、城巴及新巴），地圖底圖同地標搜尋來自 OpenStreetMap。本 App 非任何巴士公司或政府部門官方產品，班次資料以現場為準。</p>
+		</div>
 	</section>
 </div>
 

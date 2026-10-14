@@ -23,7 +23,7 @@
  */
 
 /** 殼層版本戳：純內容 hash（無日期）。改殼層檔案後跑 scripts/bump-sw.mjs 自動更新 */
-const BUILD_STAMP = '174236e3';
+const BUILD_STAMP = '7603e4e2';
 
 /** 參與版本 hash 的殼層檔案（改動任何一個都會令快取名改變） */
 const VERSIONED = [
@@ -159,14 +159,28 @@ self.addEventListener('fetch', (e) => {
 	// App Shell：Stale While Revalidate
 	e.respondWith(
 		caches.match(req).then((hit) => {
-			const net = fetch(req).then((res) => {
+			// ⚠️ 導航請求（PWA 開 App）嘅 redirect mode 係 manual，
+			//    直接 fetch(req) 撞到 307 會回 opaqueredirect → Chrome 顯示 ERR_FAILED。
+			//    強制 follow redirect（/index.html → / 由 Cloudflare assets 發出）。
+			const net = fetch(req, { redirect: 'follow' }).then((res) => {
 				if (res.ok) {
 					const copy = res.clone();
 					caches.open(self.__shellCache || SHELL_CACHE_FALLBACK).then((c) => c.put(req, copy));
 				}
 				return res;
-			}).catch(() => hit);
+			});
 			return hit || net;
+		}).catch(() => {
+			// 網絡失敗又冇快取：導航請求最後後備用預快取嘅 index.html，
+			// **唔可以 respondWith(undefined)** —— Chrome 會直接顯示 ERR_FAILED。
+			if (req.mode === 'navigate') {
+				return caches.match('./index.html')
+					.then((r) => r || new Response('離線中，請稍後再試', {
+						status: 503,
+						headers: { 'Content-Type': 'text/plain; charset=utf-8' }
+					}));
+			}
+			return Response.error();
 		})
 	);
 });

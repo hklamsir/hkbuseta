@@ -27,6 +27,10 @@
 
 	--safe-t: env(safe-area-inset-top, 0px);
 	--safe-b: env(safe-area-inset-bottom, 0px);
+
+	/* topbar 實際高度：h1（17px×1.5）＋ sub（12px×1.5）＋ padding 20px = 63.5px。
+	   sticky 資訊列（.sticky-sub / .range-bar）貼喺 topbar 正下方用 */
+	--topbar-h: 63.5px;
 }
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -74,6 +78,15 @@ body {
 	align-items: center;
 	gap: 10px;
 	box-shadow: 0 2px 8px rgba(0, 0, 0, .12);
+}
+
+/* 首頁 topbar 左上角 App logo（icon.svg 自帶圓角紅底） */
+.app-logo {
+	width: 30px;
+	height: 30px;
+	border-radius: 7px;
+	flex-shrink: 0;
+	display: block;
 }
 
 .topbar h1 {
@@ -126,7 +139,7 @@ body {
 	position: absolute;
 	top: calc(100% + 6px);
 	right: 14px;
-	width: 264px;
+	width: 292px;
 	max-width: calc(100vw - 28px);
 	background: var(--surface);
 	border: 1px solid var(--border);
@@ -141,7 +154,7 @@ body {
 	display: flex;
 	align-items: flex-start;
 	gap: 10px;
-	padding: 10px;
+	padding: 11px;
 	border-radius: var(--radius-sm);
 	width: 100%;
 	text-align: left;
@@ -152,17 +165,17 @@ body {
 button.menu-item { cursor: pointer; }
 button.menu-item:active { background: var(--surface-2); }
 .menu-item .mi-ico {
-	width: 18px; height: 18px;
+	width: 20px; height: 20px;
 	fill: none; stroke: var(--text-3);
 	stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
 	flex-shrink: 0;
-	margin-top: 1px;
+	margin-top: 2px;
 }
 .menu-item.danger .mi-ico { stroke: #c0392b; }
 .menu-item.danger .mi-title { color: #c0392b; }
 .menu-item .mi-body { flex: 1; min-width: 0; }
-.mi-title { font-size: 14px; font-weight: 500; color: var(--text); }
-.mi-desc { font-size: 11px; color: var(--text-3); line-height: 1.55; margin-top: 2px; }
+.mi-title { font-size: 16px; font-weight: 500; color: var(--text); }
+.mi-desc { font-size: 13px; color: var(--text-3); line-height: 1.55; margin-top: 2px; }
 .mi-desc a { color: var(--text-3); text-decoration: underline; }
 
 /* ============ 搜尋頁 ============ */
@@ -265,9 +278,20 @@ button.menu-item:active { background: var(--surface-2); }
 
 /* ============ 附近站列表 ============ */
 
+/* 頁首資訊常駐（2026-10-14 用戶回饋）：place-bar／route-hero 連同範圍列
+   整組 sticky，貼喺 topbar（z-50，高 54px）之下 —— scroll 時站名／
+   路線資訊唔會捲走。子元素 .range-bar 自帶 sticky，喺容器內要解除，
+   唔然雙層 sticky 偏移會疊加。 */
+.sticky-sub {
+	position: sticky;
+	top: calc(var(--safe-t) + var(--topbar-h));
+	z-index: 45;
+}
+.sticky-sub .range-bar { position: static; }
+
 .range-bar {
 	position: sticky;
-	top: calc(var(--safe-t) + 54px);
+	top: calc(var(--safe-t) + var(--topbar-h));
 	z-index: 40;
 	background: var(--surface);
 	border-bottom: 1px solid var(--border);
@@ -831,15 +855,18 @@ button.menu-item:active { background: var(--surface-2); }
 }
 .route-hero .meta .ct { font-size: 12px; color: var(--text-3); margin-left: auto; }
 
-/* 方向分頁 */
-.dir-tabs { display: flex; gap: 6px; flex: 1; min-width: 0; }
+/* 方向分頁：按鈕自然寬度置中（2026-10-14 用戶回饋：唔好攤滿成行）。
+   padding-left 36px 抵銷右邊「立即更新」掣（28px + 8px margin），
+   令按鈕組真正置中於頁面而唔係置中於剩餘空間 */
+.dir-tabs { display: flex; gap: 6px; flex: 1; min-width: 0; justify-content: center; padding-left: 36px; }
 .dir-tabs button {
-	flex: 1 1 0;
-	min-width: 0;
+	flex: 0 1 auto;
+	max-width: 100%;
+	min-width: 50%;
 	border: 1px solid var(--border);
 	background: var(--surface);
 	border-radius: 8px;
-	padding: 8px 6px;
+	padding: 8px 14px;
 	font-family: inherit;
 	font-size: 12px;
 	font-weight: 500;
@@ -941,6 +968,24 @@ button.menu-item:active { background: var(--surface-2); }
 .seq-eta .eta-list { margin-left: auto; }
 .seq-eta .none { color: var(--text-3); font-size: 12px; margin-left: auto; text-align: right; }
 .seq-eta .skel { margin-left: auto; }
+
+/* ============ 使用說明頁（2026-10-14） ============ */
+
+.help-body {
+	padding: 6px 16px calc(var(--safe-b) + 28px);
+	font-size: 14px;
+	line-height: 1.75;
+	color: var(--text-2);
+}
+.help-body h2 {
+	font-size: 15px;
+	font-weight: 600;
+	color: var(--text);
+	margin: 20px 0 4px;
+}
+.help-body h2:first-child { margin-top: 14px; }
+.help-body p { margin: 0 0 10px; }
+.help-body .em { color: var(--brand); font-weight: 600; }
 
 /* ============ M11 一鍵定位 ============ */
 
