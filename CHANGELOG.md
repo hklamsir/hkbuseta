@@ -3,6 +3,16 @@
 所有對用戶可見嘅重要變更都會記錄喺呢度。
 格式參考 [Keep a Changelog](https://keepachangelog.com/tc/)，版本號採 [語意化版本](https://semver.org/lang/zh-TW/)。
 
+## [1.5.2] — 2026-10-15
+
+### 修復
+- **更新提示橫幅失效**（用戶回報：撳「重新整理」後 bar 唔消失、亦冇進度提示）：
+  - 根因：舊實作撳掣即 `location.reload()`，但新版 SW 隨時仲未裝完（install 要網絡 pre-cache 成個 shell），reload 後導航仍由舊 SW 用舊 cache 回 → boot 後 stale 檢查即刻再彈返個 bar；加上頁面冇監聽 `controllerchange`，新 SW 接管後唔會自動 reload。
+  - 撳「重新整理」改為「更新中」狀態：橫幅顯示「正在更新…請稍候，完成後會自動重新載入」，收起按鈕、圖示轉圈、底部加不定進度條。
+  - 等新 SW 接管（`controllerchange`）先自動 reload；期間 `postMessage('skipWaiting')` 促使啟用；**8 秒後備 reload** 防部署未落地時吊死用戶。
+  - 新 SW 背景接管亦會自動 reload，避免舊 app.js 配新快取嘅混合狀態（首次 claim 除外）。
+  - 更新完成彈「✅ 已更新至最新路線資料（日期時間）」確認 toast（對比 reload 前記低嘅資料日期）。
+
 ## [1.5.1] — 2026-10-14
 
 ### 新增

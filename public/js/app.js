@@ -168,7 +168,7 @@
 	 * 為何唔直接顯示 buildId：buildId 係**離線資料**的內容 hash，每日資料更新就會變，
 	 * 用戶會誤以為係新版 app。版本號必須只隨**程式碼**改動而變。
 	 */
-	const VERSION_FALLBACK = '1.5.1';
+	const VERSION_FALLBACK = '1.5.2';
 	let APP_VERSION = VERSION_FALLBACK;
 
 	function renderVersion() {
@@ -259,6 +259,17 @@
 				DBS = stores;
 				DB = stores[co] || stores[list[0]];
 				B.setCurrentStore(DB);
+
+				// 更新流程後首次載入：資料日期有變 → 彈「已更新」確認 toast
+				try {
+					const prevStamp = sessionStorage.getItem('buseta.preUpdateStamp');
+					if (prevStamp !== null) {
+						sessionStorage.removeItem('buseta.preUpdateStamp');
+						if (prevStamp && DB.updated && prevStamp !== DB.updated) {
+							toast(`✅ 已更新至最新路線資料（${DB.updated}）`);
+						}
+					}
+				} catch { /* sessionStorage 不可用 */ }
 				// 跨公司查詢層：需要兩家都在，且其中一家帶 cross 資料
 				XQ = list.length > 1 ? B.crossQueryable(stores) : null;
 				if (XQ && !XQ.hasCross) {
@@ -2535,17 +2546,55 @@ function setRouteDir(dir, svc, ctx, hint) {
 	}
 
 	// 更新提示橫幅（規劃書 §5.5 補強）：有新版本 / 離線資料過舊時出現
+	// barUpdating：更新進行中，唔俾 visibilitychange／interval 檢查覆寫橫幅
+	// reloadDone：controllerchange 與後備 timeout 只觸發一次 reload
+	// hadController：頁面本來已被 SW 控制（首次 claim 除外，免首訪多餘 reload）
+	let barUpdating = false;
+	let reloadDone = false;
+	let hadController = !!(navigator.serviceWorker && navigator.serviceWorker.controller);
+
+	// reload 前記低目前資料日期，載入後比對彈「已更新」確認
+	function markPreUpdateStamp() {
+		try { sessionStorage.setItem('buseta.preUpdateStamp', (DB && DB.updated) || ''); } catch { /* 私密模式等 */ }
+	}
+
+	function reloadForUpdate() {
+		if (reloadDone) return;
+		reloadDone = true;
+		markPreUpdateStamp();
+		location.reload();
+	}
+
+	// 撳「重新整理」→ 橫幅轉入更新中狀態，等新版 SW 接管後自動 reload
+	function startAppUpdate() {
+		if (barUpdating) return;
+		barUpdating = true;
+		const bar = $('update-bar');
+		$('update-bar-msg').textContent = '正在更新…請稍候，完成後會自動重新載入';
+		$('update-bar-reload').hidden = true;
+		$('update-bar-dismiss').hidden = true;
+		const ico = bar.querySelector('.ub-ico');
+		if (ico) {
+			const use = ico.querySelector('use');
+			if (use) use.setAttribute('href', '#i-refresh');
+			ico.classList.add('spin');
+		}
+		bar.classList.add('show', 'updating');
+		// 新版 SW 已裝好等待 → 促使即刻啟用
+		if (swReg && swReg.waiting) { try { swReg.waiting.postMessage('skipWaiting'); } catch { /* 已啟用 */ } }
+		// 後備：無新版 SW（如部署未落地）8 秒後照 reload，唔好吊死用戶
+		setTimeout(reloadForUpdate, 8000);
+	}
+
 	function showUpdateBar(msg, opts) {
+		if (barUpdating) return; // 更新進行中，唔覆寫提示
 		opts = opts || {};
 		const bar = $('update-bar');
 		const msgEl = $('update-bar-msg');
 		const reloadBtn = $('update-bar-reload');
 		const dismissBtn = $('update-bar-dismiss');
 		msgEl.textContent = msg;
-		reloadBtn.onclick = () => {
-			hideUpdateBar();
-			(opts.onReload || (() => location.reload()))();
-		};
+		reloadBtn.onclick = () => (opts.onReload || startAppUpdate)();
 		if (opts.dismissible) {
 			dismissBtn.hidden = false;
 			dismissBtn.onclick = hideUpdateBar;
@@ -2589,6 +2638,12 @@ function setRouteDir(dir, svc, ctx, hint) {
 
 	function setupServiceWorker() {
 		if (!('serviceWorker' in navigator) || !location.protocol.startsWith('http')) return;
+		// 新版 SW activate + clients.claim 接管 → 自動 reload 換新殼層
+		// （舊 app.js 配新快取係混合狀態，必須 reload；頁面首次被 claim 除外）
+		navigator.serviceWorker.addEventListener('controllerchange', () => {
+			if (barUpdating || hadController) reloadForUpdate();
+			hadController = true;
+		});
 		addEventListener('load', () => {
 			navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' })
 				.then((reg) => {
@@ -2599,10 +2654,7 @@ function setRouteDir(dir, svc, ctx, hint) {
 						if (!sw) return;
 						sw.addEventListener('statechange', () => {
 							if (sw.state === 'installed' && navigator.serviceWorker.controller) {
-								showUpdateBar('有新版本可用，重新整理以更新程式', {
-									onReload: () => location.reload(),
-									dismissible: false,
-								});
+								showUpdateBar('有新版本可用，重新整理以更新程式', { dismissible: false });
 							}
 						});
 					});
@@ -2625,10 +2677,7 @@ function setRouteDir(dir, svc, ctx, hint) {
 		if (!built) return;
 		if (Date.now() - built.getTime() > DATA_STALE_MAX_AGE_MS) {
 			stalePrompted = true;
-			showUpdateBar(`離線資料已過期（更新於 ${DB.updated}），重新整理以獲取最新路線`, {
-				onReload: () => location.reload(),
-				dismissible: true,
-			});
+			showUpdateBar(`離線資料已過期（更新於 ${DB.updated}），重新整理以獲取最新路線`, { dismissible: true });
 		}
 	}
 

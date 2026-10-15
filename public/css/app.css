@@ -737,6 +737,7 @@ button.menu-item:active { background: var(--surface-2); }
 	font-size: 13px;
 	line-height: 1.4;
 	box-shadow: var(--shadow-lg);
+	overflow: hidden;
 }
 .update-bar.show { display: flex; }
 .update-bar .ub-ico {
@@ -765,6 +766,23 @@ button.menu-item:active { background: var(--surface-2); }
 	padding: 6px 8px;
 }
 .update-bar button.dismiss[hidden] { display: none; }
+/* 更新進行中：圖示轉圈 + 底部不定進度條 */
+.update-bar .ub-ico.spin { animation: ub-rotate 1.4s linear infinite; }
+.update-bar.updating::after {
+	content: '';
+	position: absolute;
+	left: 0; bottom: 0;
+	height: 3px;
+	width: 40%;
+	border-radius: 2px;
+	background: rgba(255, 255, 255, .85);
+	animation: ub-progress 1.2s ease-in-out infinite;
+}
+@keyframes ub-rotate { to { transform: rotate(360deg); } }
+@keyframes ub-progress {
+	0% { transform: translateX(-100%); }
+	100% { transform: translateX(350%); }
+}
 
 /* ============ 頁尾 ============ */
 
