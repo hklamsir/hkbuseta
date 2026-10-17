@@ -651,8 +651,8 @@
 
 	/* 歷史 + 常搭路線 + 常到車站 */
 
-	/** 分頁狀態：'route' = 常搭路線、'stop' = 常到車站 */
-	let favTab = 'route';
+	/** 分頁狀態：'route' = 常搭路線、'stop' = 常到車站（2026-10-17 用戶要求預設顯示常到車站） */
+	let favTab = 'stop';
 
 	/**
 	 * 最近搜尋：摺疊時只顯示最近 N 個（2026-10-12 用戶要求）。
@@ -754,7 +754,7 @@
 				<div class="card">${rows}</div>
 			</div>`;
 		} else {
-			favTab = 'route';
+			favTab = 'stop';
 		}
 		$('recent').innerHTML = html;
 
@@ -2671,12 +2671,19 @@ function setRouteDir(dir, svc, ctx, hint) {
 	}
 
 	// 開 tab 期間定時檢查：離線資料過舊就溫馨提示重新整理
+	// ⚠️ 每個資料日期只提示一次：撳過「重新整理」或「稍後」就記低（localStorage），
+	//    reload 後若 server 上其實冇更新版資料（DB.updated 不變），唔好長期重複彈個 bar 煩用戶；
+	//    直到 DB.updated 真係變咗（有新資料）先會再有提示。
 	function checkDataStale() {
 		if (stalePrompted || !DB || !DB.updated) return;
+		try {
+			if (localStorage.getItem('buseta.staleAcked') === DB.updated) return;
+		} catch { /* 私密模式等：無 localStorage 就退返原本行為（session 內只彈一次） */ }
 		const built = parseDataUpdated(DB.updated);
 		if (!built) return;
 		if (Date.now() - built.getTime() > DATA_STALE_MAX_AGE_MS) {
 			stalePrompted = true;
+			try { localStorage.setItem('buseta.staleAcked', DB.updated); } catch { /* 同上 */ }
 			showUpdateBar(`離線資料已過期（更新於 ${DB.updated}），重新整理以獲取最新路線`, { dismissible: true });
 		}
 	}
