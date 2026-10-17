@@ -1,7 +1,7 @@
 {
-  "built": "2026-10-16T23:44:09.243Z",
-  "updated": "2026-10-16 23:44",
-  "buildId": "3de1cbf3",
+  "built": "2026-10-17T23:15:14.064Z",
+  "updated": "2026-10-17 23:15",
+  "buildId": "60936769",
   "stops": 6775,
   "routes": 1611,
   "routeStops": 36377,
@@ -13,14 +13,14 @@
     },
     {
       "name": "routes.json.gz",
-      "raw": 548888,
-      "gz": 164921
+      "raw": 548890,
+      "gz": 164928
     }
   ],
   "companies": {
     "kmb": {
       "label": "九巴及龍運",
-      "buildId": "5350204d",
+      "buildId": "b73b82f6",
       "stops": 6775,
       "routes": 1611,
       "routeStops": 36377,
@@ -32,8 +32,8 @@
         },
         {
           "name": "routes.json.gz",
-          "raw": 548888,
-          "gz": 164921
+          "raw": 548890,
+          "gz": 164928
         }
       ]
     },
