@@ -1,53 +1,53 @@
 {
-  "built": "2026-10-22T00:04:18.603Z",
-  "updated": "2026-10-22 00:04",
-  "buildId": "702bde5c",
-  "stops": 6779,
-  "routes": 1609,
-  "routeStops": 36373,
+  "built": "2026-10-23T23:54:14.950Z",
+  "updated": "2026-10-23 23:54",
+  "buildId": "861d8aaa",
+  "stops": 6778,
+  "routes": 1608,
+  "routeStops": 36368,
   "files": [
     {
       "name": "stops.json.gz",
-      "raw": 452326,
-      "gz": 182443
+      "raw": 452258,
+      "gz": 182422
     },
     {
       "name": "routes.json.gz",
-      "raw": 548759,
-      "gz": 164745
+      "raw": 548659,
+      "gz": 164735
     }
   ],
   "companies": {
     "kmb": {
       "label": "九巴及龍運",
-      "buildId": "5ce47e43",
-      "stops": 6779,
-      "routes": 1609,
-      "routeStops": 36373,
+      "buildId": "d116ae95",
+      "stops": 6778,
+      "routes": 1608,
+      "routeStops": 36368,
       "files": [
         {
           "name": "stops.json.gz",
-          "raw": 452326,
-          "gz": 182443
+          "raw": 452258,
+          "gz": 182422
         },
         {
           "name": "routes.json.gz",
-          "raw": 548759,
-          "gz": 164745
+          "raw": 548659,
+          "gz": 164735
         }
       ]
     },
     "ctb": {
       "label": "城巴及新巴",
-      "buildId": "ca613a91",
+      "buildId": "0b7777b6",
       "stops": 2594,
       "routes": 818,
       "routeStops": 17445,
       "files": [
         {
           "name": "ctb-stops.json.gz",
-          "raw": 154169,
-          "gz": 52683
+          "raw": 154178,
+          "gz": 52689
         },
         {
           "name": "ctb-routes.json.gz",
@@ -62,8 +62,8 @@
     "oneToMany": 53,
     "matchedCtb": 1150,
     "dirs": 54,
-    "sharedRoutes": 149,
+    "sharedRoutes": 148,
     "collide": 55,
-    "uncertain": 40
+    "uncertain": 39
   }
 }
