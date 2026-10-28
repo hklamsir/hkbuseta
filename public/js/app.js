@@ -168,7 +168,7 @@
 	 * 為何唔直接顯示 buildId：buildId 係**離線資料**的內容 hash，每日資料更新就會變，
 	 * 用戶會誤以為係新版 app。版本號必須只隨**程式碼**改動而變。
 	 */
-	const VERSION_FALLBACK = '1.5.2';
+	const VERSION_FALLBACK = '1.5.3';
 	let APP_VERSION = VERSION_FALLBACK;
 
 	function renderVersion() {
@@ -814,7 +814,9 @@
 			// ⚠️ 跨公司顯示後，stop ID 可能兩家都有 → 必須連 co 一起比對
 			const bco = b.dataset.co || DEFAULT_CO;
 			const x = f.find((y) => y.stop === b.dataset.f && (y.co || DEFAULT_CO) === bco);
-			if (x) openEta({ stop: x.stop, co: bco, name: x.name, lat: x.lat, lng: x.lng, from: 'recent' });
+			// M13（2026-10-28）：有 ids（合併站收藏）→ 帶埋入去，
+			// fetchEta 會逐個成員查詢再合併（同附近站入口一致）
+			if (x) openEta({ stop: x.stop, co: bco, name: x.name, lat: x.lat, lng: x.lng, ids: x.ids, from: 'recent' });
 		}));
 		$('recent').querySelectorAll('[data-unfav]').forEach((b) => b.addEventListener('click', (e) => {
 			e.stopPropagation();
@@ -1281,6 +1283,16 @@
 		if (Array.isArray(stop.ids)) {
 			stop.ids = stop.ids.map((x) =>
 				(typeof x === 'string' ? { co: stop.co, stop: x } : { ...x, co: x.co || stop.co }));
+		} else if (stop.from === 'recent') {
+			// M13（2026-10-28）舊收藏自動升級：常到車站以前只儲單一 stop ID，
+			// 由常到車站進入會少咗鄰近同名行車位嘅路線（實測 KC377 少咗
+			// 203E/72X/9/3C/45/18）。用離線資料重算同名合併組（同 renderNearby
+			// §2b 邏輯一致），回寫收藏後下次免再算。單站組（無成員）不動。
+			const ids = B.mergedStopGroup(DBS, stop.co, stop.stop);
+			if (ids.length > 1) {
+				stop.ids = ids;
+				B.store.favorites.attachIds(stop.co, stop.stop, ids);
+			}
 		}
 		state.stop = stop;
 		// 記錄來源，供返回按鈕決定目標：
@@ -1329,7 +1341,9 @@
 		const s = state.stop;
 		if (!s) return;
 		const co = s.co || adapter.id;
-		B.store.favorites.toggle(co, { stop: s.stop, name: s.name, lat: s.lat, lng: s.lng });
+		// M13（2026-10-28）：合併站要連成員 ids 一齊儲，否則由常到車站
+		// 再進入時淨查單一 stop，會少咗鄰近行車位嘅路線（實測 KC377）。
+		B.store.favorites.toggle(co, { stop: s.stop, name: s.name, lat: s.lat, lng: s.lng, ids: s.ids });
 		syncFavBtn();
 		toast(B.store.favorites.has(co, s.stop) ? '已加入常到車站' : '已移除');
 		renderRecent();

@@ -1034,6 +1034,52 @@
 	}
 
 	/**
+	 * 由離線資料重算某站嘅「同名合併組」成員（2026-10-28，M13）。
+	 *
+	 * 背景：舊版常到車站收藏只儲單一 stop ID，由常到車站進入 ETA 頁會
+	 * 少咗鄰近同名行車位嘅路線（實測 KC377 少咗 203E/72X/9/3C/45/18，
+	 * 呢啲線停喺隔離行車位）。
+	 *
+	 * 邏輯同 renderNearby §2b 一致（app.js）：同 groupKey（剝除括號後站名）
+	 * 且任兩成員 ≤120 米 → union，再取自己所屬嘅連通分量。
+	 * 跨公司一齊收（CTB 同名站照併，成員各自帶自己 co）。
+	 *
+	 * @returns {Array<{co,stop}>} 一定包含自己；資料未載入或無同組成員時回單元素
+	 */
+	function mergedStopGroup(stores, co, stopId) {
+		const self = stores && stores[co] && stores[co].stopById.get(stopId);
+		if (!self) return [{ co, stop: stopId }];
+		const gk = groupKey(self.name);
+		const cand = [];
+		for (const c of Object.keys(stores)) {
+			for (const s of stores[c].stopById.values()) {
+				if (groupKey(s.name) === gk) {
+					cand.push({ co: c, stop: s.stop, lat: s.lat, lng: s.lng });
+				}
+			}
+		}
+		if (cand.length <= 1) return [{ co, stop: stopId }];
+		// union-find：≤120 米連坐標（決定性：細 key 做根，同 physGroups 慣例）
+		const keyOf = (x) => `${x.co}|${x.stop}`;
+		const parent = new Map(cand.map((x) => [keyOf(x), keyOf(x)]));
+		const find = (x) => {
+			while (parent.get(x) !== x) { parent.set(x, parent.get(parent.get(x))); x = parent.get(x); }
+			return x;
+		};
+		for (let i = 0; i < cand.length; i++) {
+			for (let j = i + 1; j < cand.length; j++) {
+				if (haversine(cand[i].lat, cand[i].lng, cand[j].lat, cand[j].lng) <= 120) {
+					const ra = find(keyOf(cand[i])), rb = find(keyOf(cand[j]));
+					if (ra !== rb) { if (ra < rb) parent.set(rb, ra); else parent.set(ra, rb); }
+				}
+			}
+		}
+		const root = find(keyOf({ co, stop: stopId }));
+		return cand.filter((x) => find(keyOf(x)) === root)
+			.map((x) => ({ co: x.co, stop: x.stop }));
+	}
+
+	/**
 	 * 把中心點展開成「物理站群組」（ADR-001 候選站展開）。
 	 *
 	 * 每群 = 500 米（WALK_RADIUS）內候選站經 cross 配對 union 後的同一物理站；
@@ -1538,9 +1584,12 @@
 		},
 		/**
 		 * 常到車站（收藏的站）。
-		 * 項目：{ co, stop, name, lat, lng }
+		 * 項目：{ co, stop, name, lat, lng, ids? }
 		 * ⚠️ co 必須存：兩家公司的 stop ID 格式都係字串但互不相同，
 		 *   只靠 stop 去重會令城巴 002737 誤刪九巴同名站。
+		 * ids（2026-10-28）：合併站成員清單 [{co,stop}]——附近站／地圖入 ETA 頁
+		 *   會帶成組成員（同名且 ≤120 米嘅行車位），加星時一併儲存；
+		 *   舊收藏冇 ids 由 openEta 入口用 mergedStopGroup() 重算並回寫（自動升級）。
 		 */
 		favorites: {
 			/** 全部（不分公司）；load(co) 才過濾 */
@@ -1558,9 +1607,29 @@
 				const all = this.loadAll();
 				const i = all.findIndex((f) => f.stop === stop.stop && coOf(f) === c);
 				if (i >= 0) all.splice(i, 1);
-				else all.unshift({ co: c, stop: stop.stop, name: stop.name, lat: stop.lat, lng: stop.lng });
+				else {
+					const item = { co: c, stop: stop.stop, name: stop.name, lat: stop.lat, lng: stop.lng };
+					// 合併站：成員清單一併儲存（只有多於一個成員先有意義）
+					if (Array.isArray(stop.ids) && stop.ids.length > 1) {
+						item.ids = stop.ids.map((x) => ({ co: x.co || c, stop: x.stop }));
+					}
+					all.unshift(item);
+				}
 				lsSet(LS_FAV, all);
 				return i < 0;
+			},
+			/**
+			 * 舊收藏升級：補入合併組成員 ids（2026-10-28）。
+			 * 已有 ids 且成員數不少於新值 → 不動（避免覆蓋較完整嘅舊資料）。
+			 */
+			attachIds(co, stopId, ids) {
+				const c = co || DEFAULT_CO;
+				if (!Array.isArray(ids) || ids.length < 2) return;
+				const all = this.loadAll();
+				const f = all.find((x) => x.stop === stopId && coOf(x) === c);
+				if (!f || (Array.isArray(f.ids) && f.ids.length >= ids.length)) return;
+				f.ids = ids.map((x) => ({ co: x.co || c, stop: x.stop }));
+				lsSet(LS_FAV, all);
 			},
 			clear() { localStorage.removeItem(LS_FAV); }
 		},
@@ -1700,7 +1769,7 @@
 		findRouteIdx, resolveRouteSeq,
 		normalizeEta, formatEta, SERVICE_LABELS,
 		// M12 點到點規劃（ADR-001）
-		planTrip, physGroups, physicalMembers, WALK_RADIUS, PLAN_CAP_STOPS, PLAN_CAP_MS, WALK_FACTOR,
+		planTrip, physGroups, physicalMembers, mergedStopGroup, WALK_RADIUS, PLAN_CAP_STOPS, PLAN_CAP_MS, WALK_FACTOR,
 		// M12 即時班次過濾（2026-10-13 用戶回饋）
 		tripEtaKey, checkTripEtas, applyTripEtaFilter, clearTripEtaCache,
 		// mapCtbEta 匯出供 verify.mjs [CTB-2] 直接驗證兩種 raw 形狀的映射

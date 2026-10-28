@@ -2092,6 +2092,82 @@ ok(!g7.supported, '[GEO-7] 測試環境已模擬唔支援 geolocation');
 ok(g7.locateHidden && g7.gpsHidden, '[GEO-7] 唔支援 → 定位掣／trip GPS 掣隱藏', JSON.stringify(g7));
 ok(g7.relocateDisabled, '[GEO-7] 唔支援 → 重新定位掣停用');
 
+/* ---------- 9g. M13 常到車站合併組（2026-10-28） ---------- */
+// 用戶回報：bookmark 咗中電鐘樓文化館 KC377，由附近站入有齊隔離行車位嘅
+// 路線（203E/72X/9/3C/45/18），由常到車站入就少咗 —— 舊收藏只儲單一 stop ID。
+console.log('\n[9g] 常到車站合併組（M13）');
+// 由 DB 動態搵站，唔寫死 stop ID（官方資料會變）
+const kc = await page.evaluate(() => {
+	for (const [co, db] of Object.entries(window.__DBS)) {
+		for (const s of db.stopById.values()) {
+			if (s.name.includes('中電鐘樓')) return { co, stop: s.stop, name: s.name, lat: s.lat, lng: s.lng };
+		}
+	}
+	return null;
+});
+ok(!!kc, 'DB 搵到中電鐘樓文化館（用戶回報個案）', kc ? `${kc.co}:${kc.stop}` : '(無)');
+
+if (kc) {
+	// [FAV-1] mergedStopGroup：由離線資料重算同名合併組（同 renderNearby §2b 邏輯一致）
+	const grp = await page.evaluate(({ co, stop }) =>
+		window.BusETA.mergedStopGroup(window.__DBS, co, stop), kc);
+	ok(grp.length > 1, '[FAV-1] mergedStopGroup 重算出多成員合併組', `${grp.length} 成員`);
+	ok(grp.some((x) => x.co === kc.co && x.stop === kc.stop), '[FAV-1] 合併組包含自己');
+
+	// [FAV-2] favorites 資料層：toggle 儲 ids + attachIds 升級守衛
+	const store = await page.evaluate(({ co, stop, name, lat, lng, grp }) => {
+		const B = window.BusETA;
+		const out = {};
+		B.store.favorites.toggle(co, { stop, name, lat, lng, ids: grp });
+		out.withIds = (B.store.favorites.loadAll().find((x) => x.stop === stop) || {}).ids || null;
+		// 模擬舊版收藏（toggle 兩次：先移除帶 ids 版本，再以舊格式重新加入）
+		B.store.favorites.toggle(co, { stop, name, lat, lng });
+		B.store.favorites.toggle(co, { stop, name, lat, lng });
+		B.store.favorites.attachIds(co, stop, grp);
+		out.upgraded = (B.store.favorites.loadAll().find((x) => x.stop === stop) || {}).ids || null;
+		// 已有同樣多成員 → 唔會重寫（成員清單保留原值）
+		const before = JSON.stringify(B.store.favorites.loadAll().find((x) => x.stop === stop)?.ids);
+		B.store.favorites.attachIds(co, stop, [{ co, stop }]);
+		out.untouched = JSON.stringify(B.store.favorites.loadAll().find((x) => x.stop === stop)?.ids) === before;
+		// 清場，唔影響後續 E2E
+		B.store.favorites.toggle(co, { stop });
+		return out;
+	}, { ...kc, grp });
+	ok(Array.isArray(store.withIds) && store.withIds.length > 1,
+		'[FAV-2] toggle() 有 ids 時一併儲存（舊版會掉棄）', `${store.withIds?.length} 成員`);
+	ok(Array.isArray(store.upgraded) && store.upgraded.length > 1,
+		'[FAV-2] attachIds() 為舊收藏補入成員清單', `${store.upgraded?.length} 成員`);
+	ok(store.untouched, '[FAV-2] attachIds() 唔會用細組覆蓋大組');
+
+	// [FAV-3] E2E：preset 舊版收藏（無 ids）→ 由常到車站進入 → 自動回寫
+	await page.evaluate((fav) => {
+		localStorage.setItem('buseta.favorites', JSON.stringify([fav]));
+	}, { co: kc.co, stop: kc.stop, name: kc.name, lat: kc.lat, lng: kc.lng });
+	await page.reload({ waitUntil: 'networkidle' });
+	await page.waitForFunction(() => document.getElementById('data-stamp')?.textContent?.includes('車站'), { timeout: 25000 });
+	await page.waitForSelector('#recent [data-f]', { timeout: 15000 });
+	await page.click('#recent [data-f]');
+	await page.waitForSelector('#page-eta.active', { timeout: 10000 });
+	await page.waitForSelector('#eta-list .eta-row, #eta-list .empty, #eta-list .error-box', { timeout: 20000 });
+	const fav3 = await page.evaluate((stopId) => {
+		const f = (JSON.parse(localStorage.getItem('buseta.favorites') || '[]'))
+			.find((x) => x.stop === stopId);
+		return { ids: f?.ids || null, rows: document.querySelectorAll('#eta-list .eta-row').length };
+	}, kc.stop);
+	ok(Array.isArray(fav3.ids) && fav3.ids.length > 1,
+		'[FAV-3] 舊收藏經常到車站進入後自動回寫 ids（毋須重新加星）', `${fav3.ids?.length} 成員`);
+	ok(fav3.rows > 0, '[FAV-3] ETA 頁正常渲染', `${fav3.rows} 行`);
+	await page.screenshot({ path: join(SHOTS, '15-fav-merged-eta.png') });
+	// 清場：剷走測試收藏，避免影響 [10]／之後嘅 session
+	await page.evaluate((stopId) => {
+		const all = JSON.parse(localStorage.getItem('buseta.favorites') || '[]')
+			.filter((x) => x.stop !== stopId);
+		localStorage.setItem('buseta.favorites', JSON.stringify(all));
+	}, kc.stop);
+	await page.evaluate(() => window.history.back());
+	await page.waitForTimeout(400);
+}
+
 /* ---------- 10. Console 錯誤 ---------- */
 console.log('\n[10] Console 檢查');
 const realErrors = consoleErrors.filter((e) => !/favicon|ERR_INTERNET|Failed to load resource.*tile|net::/i.test(e));
