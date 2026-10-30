@@ -1,7 +1,7 @@
 {
-  "built": "2026-10-28T00:36:49.590Z",
-  "updated": "2026-10-28 00:36",
-  "buildId": "d0f9d4dc",
+  "built": "2026-10-30T01:11:48.010Z",
+  "updated": "2026-10-30 01:11",
+  "buildId": "e332bd0e",
   "stops": 6774,
   "routes": 1604,
   "routeStops": 36355,
@@ -39,10 +39,10 @@
     },
     "ctb": {
       "label": "城巴及新巴",
-      "buildId": "eff77704",
+      "buildId": "0d414e3b",
       "stops": 2594,
-      "routes": 818,
-      "routeStops": 17447,
+      "routes": 820,
+      "routeStops": 17456,
       "files": [
         {
           "name": "ctb-stops.json.gz",
@@ -51,8 +51,8 @@
         },
         {
           "name": "ctb-routes.json.gz",
-          "raw": 289467,
-          "gz": 92983
+          "raw": 289652,
+          "gz": 93054
         }
       ]
     }
