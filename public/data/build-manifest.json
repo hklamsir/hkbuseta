@@ -1,39 +1,39 @@
 {
-  "built": "2026-11-09T01:03:39.745Z",
-  "updated": "2026-11-09 01:03",
-  "buildId": "f7958a78",
-  "stops": 6773,
-  "routes": 1606,
-  "routeStops": 36320,
+  "built": "2026-11-10T03:40:57.222Z",
+  "updated": "2026-11-10 03:40",
+  "buildId": "8551a909",
+  "stops": 6772,
+  "routes": 1604,
+  "routeStops": 36316,
   "files": [
     {
       "name": "stops.json.gz",
-      "raw": 452201,
-      "gz": 182374
+      "raw": 452189,
+      "gz": 182366
     },
     {
       "name": "routes.json.gz",
-      "raw": 547887,
-      "gz": 164705
+      "raw": 547772,
+      "gz": 164652
     }
   ],
   "companies": {
     "kmb": {
       "label": "九巴及龍運",
-      "buildId": "88e1edb9",
-      "stops": 6773,
-      "routes": 1606,
-      "routeStops": 36320,
+      "buildId": "1da1b7d3",
+      "stops": 6772,
+      "routes": 1604,
+      "routeStops": 36316,
       "files": [
         {
           "name": "stops.json.gz",
-          "raw": 452201,
-          "gz": 182374
+          "raw": 452189,
+          "gz": 182366
         },
         {
           "name": "routes.json.gz",
-          "raw": 547887,
-          "gz": 164705
+          "raw": 547772,
+          "gz": 164652
         }
       ]
     },
